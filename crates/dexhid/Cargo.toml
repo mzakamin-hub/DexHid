@@ -21,5 +21,3 @@ wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
 ab_glyph = "0.2"
-png = "0.17"
-zune-jpeg = "0.4"

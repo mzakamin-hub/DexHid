@@ -492,12 +492,9 @@ fn draw_button(cv: &mut Canvas, f: &mut Fonts, ppm: f32, p: &Palette, r: &Rect, 
     f.draw_centered(cv, r, label, (r.h * 0.42).min(ppm * 4.0), p.text);
 }
 
-fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, labels: Option<&crate::xkb::Labels>, wallpaper: Option<&Vec<u32>>) {
+fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, labels: Option<&crate::xkb::Labels>) {
     let p = pal(m);
     cv.clear(p.bg);
-    if let Some(w) = wallpaper.filter(|w| w.len() == cv.px.len()) {
-        cv.px.copy_from_slice(w);
-    }
     let ppm = m.px_per_mm;
     let cr = corner(m);
     cv.fill(&m.strip, p.strip);
@@ -712,13 +709,6 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
     let mut pool_gen = 0u64;
     let mut last_geo: Option<Geometry> = None;
     let codes = keycodes::all_codes();
-    let mut wp: Option<Vec<u32>> = None;
-    let mut wp_key = (String::new(), 0, 0, false);
-    // M2.1 fix: the wallpaper is decoded + blurred in a helper thread (it took 1.3 s on the tablet and blocked this
-    // loop: surface changes were missed and the UI heartbeat stalled)
-    type WpKey = (String, i32, i32, bool);
-    let (wp_tx, wp_rx) = std::sync::mpsc::channel::<(WpKey, Result<Vec<u32>, String>, i64)>();
-    let mut wp_loading: Option<WpKey> = None;
     let mut last_legends = String::new();
 
     let internal = |outs: &[OutInfo]| -> Option<usize> {
@@ -752,26 +742,6 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
                 }
                 Err(e) => println!("XKB {} (legends stay US)", e),
             }
-            labels_gen += 1;
-            need_draw = true;
-        }
-        // a wallpaper finished loading in its helper thread
-        while let Ok((k, r, ms)) = wp_rx.try_recv() {
-            if wp_loading.as_ref() == Some(&k) {
-                wp_loading = None;
-            }
-            match r {
-                Ok(v) => {
-                    println!("WALLPAPER loaded {}x{} blur={} ms={}", k.1, k.2, k.3, ms);
-                    wp = Some(v);
-                }
-                Err(e) => {
-                    println!("WALLPAPER not shown: {}", e);
-                    wp = None;
-                }
-            }
-            wp_key = k;
-            // a new static key: the static layer and every buffer are redrawn in full
             labels_gen += 1;
             need_draw = true;
         }
@@ -939,24 +909,8 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
                             let key = (model.version, labels_gen);
                             if static_key != key || static_px.len() != (bw * bh) as usize {
                                 static_px.resize((bw * bh) as usize, 0);
-                                let blur = model.desk.as_ref().is_some_and(|d| d.blur);
-                                let wkey = (model.wallpaper.clone(), bw, bh, blur);
-                                if !model.wallpaper.is_empty() && wp_key != wkey && wp_loading.as_ref() != Some(&wkey) {
-                                    // drawn without the wallpaper now, redrawn when the helper thread is done
-                                    wp_loading = Some(wkey.clone());
-                                    let tx = wp_tx.clone();
-                                    let wake = sh.wake_ui;
-                                    let k = wkey.clone();
-                                    let _ = std::thread::Builder::new().name("wallpaper".into()).spawn(move || {
-                                        let t0 = mono_ms();
-                                        let r = crate::wallpaper::load(&k.0, k.1, k.2, k.3);
-                                        let _ = tx.send((k, r, mono_ms() - t0));
-                                        poke(wake);
-                                    });
-                                }
-                                let wpr = if !model.wallpaper.is_empty() && wp_key == wkey { wp.as_ref() } else { None };
                                 let mut cv = Canvas { px: &mut static_px, bw, bh, scale };
-                                draw_static(&mut cv, &mut fonts, model, labels.as_ref(), wpr);
+                                draw_static(&mut cv, &mut fonts, model, labels.as_ref());
                                 static_key = key;
                                 if sh.debug {
                                     let l = legends_line(model, labels.as_ref());
@@ -1127,14 +1081,14 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
         cfg.laptop_pad_pct = a.f64("--pad-pct", 100.0) as f32;
     }
     let mut r = Router::new(cfg, l);
-    // M2.1: the desktop look from a kdeglobals file (+ optional plasmashellrc), the wallpaper behind the deck
+    // M2.1: the desktop look from a kdeglobals file (+ optional plasmashellrc)
     if let Some(f) = a.val("--desk") {
         let kg = std::fs::read_to_string(&f).unwrap_or_default();
         let ps = a.val("--plasmashellrc").and_then(|p| std::fs::read_to_string(p).ok());
         let d = feedback::desk_look(&kg, ps.as_deref(), None, a.val("--radius-px").and_then(|v| v.parse().ok()));
         println!("DESK {:?}", d.as_ref().map(|d| (&d.scheme, d.translucent)));
         r.set_theme("desktop", "#4a8be0", 100);
-        r.set_look(d, &a.val("--wallpaper").unwrap_or_default());
+        r.set_look(d);
     }
     if a.flag("--quick") {
         let q = dexhid_core::config::QuickCfg::default();
@@ -1220,19 +1174,8 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
     let mut fonts = Fonts::load();
     println!("FONT {} ok={}", fonts.path, fonts.ok());
     {
-        let wp = if m.wallpaper.is_empty() {
-            None
-        } else {
-            match crate::wallpaper::load(&m.wallpaper, bw, bh, m.desk.as_ref().is_some_and(|d| d.blur)) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    println!("WALLPAPER not shown: {}", e);
-                    None
-                }
-            }
-        };
         let mut cv = Canvas { px: &mut px, bw, bh, scale };
-        draw_static(&mut cv, &mut fonts, &m, labels.as_ref(), wp.as_ref());
+        draw_static(&mut cv, &mut fonts, &m, labels.as_ref());
         draw_dynamic(&mut cv, &mut fonts, &m, labels.as_ref());
     }
     println!("{}", legends_line(&m, labels.as_ref()));

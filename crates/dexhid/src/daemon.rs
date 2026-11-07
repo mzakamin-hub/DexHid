@@ -154,7 +154,6 @@ struct D {
     // M2.1
     panels_moved: bool,
     desk: Option<dexhid_core::feedback::DeskLook>,
-    desk_wallpaper: String,
 }
 
 pub fn run(opts: Opts) -> i32 {
@@ -175,13 +174,16 @@ pub fn run(opts: Opts) -> i32 {
         paths.push(c.clone());
     }
     let settings_path = config::settings_path(&cfg_home);
-    let settings = match config::load_settings(&settings_path) {
+    let mut settings = match config::load_settings(&settings_path) {
         Ok(t) => t,
         Err(e) => {
             println!("WARN settings {} (ignored)", e);
             toml::Table::new()
         }
     };
+    for n in config::strip_retired(&mut settings) {
+        println!("CONFIG {} in {}", n, settings_path.display());
+    }
     let (cfg, notes) = config::load_with(&paths, &settings, opts.config.is_some());
     for n in notes {
         println!("CONFIG {}", n);
@@ -393,7 +395,6 @@ pub fn run(opts: Opts) -> i32 {
         guard_respawn_at: None,
         panels_moved: false,
         desk: None,
-        desk_wallpaper: String::new(),
         cfg,
         opts,
     };
@@ -598,9 +599,9 @@ impl D {
         if matches!(self.cfg.theme.as_str(), "auto" | "desktop") && old.as_ref().is_none_or(|o| o.theme != self.cfg.theme) {
             self.worker.send(Job::ThemeAuto);
         }
-        // M2.1: the desktop look (re-read when the theme / wallpaper setting changes, and at every grab)
-        if self.cfg.theme == "desktop" && old.as_ref().is_none_or(|o| o.theme != "desktop" || o.wallpaper != self.cfg.wallpaper) {
-            self.worker.send(Job::DeskLook { internal: self.cfg.internal_output.clone(), wallpaper: self.cfg.wallpaper });
+        // M2.1: the desktop look (re-read when the theme setting changes, and at every grab)
+        if self.cfg.theme == "desktop" && old.as_ref().is_none_or(|o| o.theme != "desktop") {
+            self.worker.send(Job::DeskLook);
         }
         self.apply_theme();
         if let Some(o) = &old {
@@ -647,7 +648,7 @@ impl D {
             t => t.to_string(),
         };
         let desktop = self.cfg.theme == "desktop";
-        let o = self.router.set_look(if desktop { self.desk.clone() } else { None }, if desktop && self.cfg.wallpaper { &self.desk_wallpaper } else { "" });
+        let o = self.router.set_look(if desktop { self.desk.clone() } else { None });
         self.apply(o);
         let o = self.router.set_theme(&theme, &self.cfg.accent, self.cfg.key_alpha);
         self.apply(o);
@@ -911,10 +912,9 @@ impl D {
                 self.theme_auto = t;
                 self.apply_theme();
             }
-            Cmd::DeskLook(d, wp, note) => {
+            Cmd::DeskLook(d, note) => {
                 println!("{} t={}", note, mono_ms());
                 self.desk = d;
-                self.desk_wallpaper = wp;
                 self.apply_theme();
             }
         }
@@ -1238,7 +1238,7 @@ impl D {
                             // M2.1: panels to the monitor, the desktop look re-read (it may have changed)
                             self.panels_out();
                             if self.cfg.theme == "desktop" {
-                                self.worker.send(Job::DeskLook { internal: self.cfg.internal_output.clone(), wallpaper: self.cfg.wallpaper });
+                                self.worker.send(Job::DeskLook);
                             }
                         }
                         Err(err) => {
@@ -1336,7 +1336,6 @@ impl D {
             "arrangement": if self.router.model().laptop { "laptop" } else { "free" },
             "panels_moved": self.panels_moved,
             "desk_scheme": self.desk.as_ref().map(|d| d.scheme.clone()),
-            "wallpaper": !self.router.model().wallpaper.is_empty(),
         })
         .to_string();
         if s != self.status {

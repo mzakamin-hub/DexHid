@@ -208,8 +208,6 @@ pub struct UiModel {
     pub laptop: bool,
     /// M2.1: the desktop's look (theme "desktop"), None = built-in palette
     pub desk: Option<crate::feedback::DeskLook>,
-    /// M2.1: wallpaper image behind the deck ("" = none)
-    pub wallpaper: String,
     /// latched sticky modifiers (code, locked)
     pub latched: Vec<(u16, bool)>,
     pub fn_on: bool,
@@ -322,7 +320,6 @@ pub struct Router {
     swipe: Swipe,
     synth: Option<Synth>,
     desk: Option<crate::feedback::DeskLook>,
-    wallpaper: String,
 }
 
 impl Router {
@@ -364,17 +361,15 @@ impl Router {
             swipe,
             synth: None,
             desk: None,
-            wallpaper: String::new(),
         }
     }
 
-    /// M2.1: the desktop's look (theme "desktop") and the wallpaper path ("" = none)
-    pub fn set_look(&mut self, desk: Option<crate::feedback::DeskLook>, wallpaper: &str) -> Vec<Out> {
-        if self.desk == desk && self.wallpaper == wallpaper {
+    /// M2.1: the desktop's look (theme "desktop")
+    pub fn set_look(&mut self, desk: Option<crate::feedback::DeskLook>) -> Vec<Out> {
+        if self.desk == desk {
             return vec![];
         }
         self.desk = desk;
-        self.wallpaper = wallpaper.to_string();
         self.relayout()
     }
 
@@ -813,7 +808,6 @@ impl Router {
             altgr: self.keys.held_codes().contains(&keycodes::KEY_RIGHTALT),
             laptop,
             desk: self.desk.clone(),
-            wallpaper: self.wallpaper.clone(),
             latched: self.keys.latched(),
             fn_on: self.keys.fn_active(),
             notice,

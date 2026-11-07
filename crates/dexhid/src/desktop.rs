@@ -26,8 +26,8 @@ pub enum Job {
     PanelsMove { internal: String, state: PathBuf, test_target: Option<i32> },
     /// M2.1: put every panel back on the screen recorded in the state file (also after a crash, at start)
     PanelsRestore { state: PathBuf, why: String },
-    /// M2.1: read the desktop look (KDE files) and, if wanted, the internal screen's wallpaper
-    DeskLook { internal: String, wallpaper: bool },
+    /// M2.1: read the desktop look (KDE files)
+    DeskLook,
 }
 
 pub struct Worker {
@@ -86,9 +86,9 @@ impl Worker {
                                 sh.send(Cmd::Note(r));
                             }
                         }
-                        Job::DeskLook { internal, wallpaper } => {
-                            let (d, wp, note) = desk_look(&internal, wallpaper);
-                            sh.send(Cmd::DeskLook(d, wp, note));
+                        Job::DeskLook => {
+                            let (d, note) = desk_look();
+                            sh.send(Cmd::DeskLook(d, note));
                         }
                     }
                 }
@@ -573,28 +573,17 @@ fn kde_cfg(name: &str) -> Option<String> {
     std::fs::read_to_string(Path::new(&home).join(".config").join(name)).ok()
 }
 
-/// the KDE look + the internal screen's wallpaper (when wanted); the third value is a log line
-pub fn desk_look(internal: &str, want_wallpaper: bool) -> (Option<dexhid_core::feedback::DeskLook>, String, String) {
-    let Some(kg) = kde_cfg("kdeglobals") else { return (None, String::new(), "THEME-DESKTOP no kdeglobals: built-in theme".into()) };
+/// the KDE look; the second value is a log line
+pub fn desk_look() -> (Option<dexhid_core::feedback::DeskLook>, String) {
+    let Some(kg) = kde_cfg("kdeglobals") else { return (None, "THEME-DESKTOP no kdeglobals: built-in theme".into()) };
     let radius = ["klassyrc", "breezerc"].iter().find_map(|f| {
         let m = dexhid_core::feedback::parse_ini(&kde_cfg(f)?);
         m.iter().find(|((_, k), _)| k == "WindowCornerRadius" || k == "CornerRadius").and_then(|(_, v)| v.parse::<f32>().ok())
     });
     let d = dexhid_core::feedback::desk_look(&kg, kde_cfg("plasmashellrc").as_deref(), kde_cfg("kwinrc").as_deref(), radius);
-    let mut wp = String::new();
-    let mut wnote = String::from("off");
-    if want_wallpaper && d.is_some() {
-        match wallpaper_of_internal(internal) {
-            Ok(p) => {
-                wnote = "found".into();
-                wp = p;
-            }
-            Err(e) => wnote = e,
-        }
-    }
     let note = match &d {
         Some(x) => format!(
-            "THEME-DESKTOP scheme={} window=#{:06x} view=#{:06x} button=#{:06x} accent=#{:06x} translucent={} blur={} radius_mm={:.1} wallpaper={}",
+            "THEME-DESKTOP scheme={} window=#{:06x} view=#{:06x} button=#{:06x} accent=#{:06x} translucent={} blur={} radius_mm={:.1}",
             if x.scheme.is_empty() { "-" } else { &x.scheme },
             x.window & 0xffffff,
             x.view & 0xffffff,
@@ -602,42 +591,11 @@ pub fn desk_look(internal: &str, want_wallpaper: bool) -> (Option<dexhid_core::f
             x.accent & 0xffffff,
             x.translucent,
             x.blur,
-            x.radius_mm,
-            wnote
+            x.radius_mm
         ),
         None => "THEME-DESKTOP kdeglobals has no colour scheme colours: built-in theme".into(),
     };
-    (d, wp, note)
-}
-
-const WALL_JS: &str = "var o=[];for(var i=0;i<screenCount;i++){var d=desktopForScreen(i);if(!d)continue;d.currentConfigGroup=[\"Wallpaper\",\"org.kde.image\",\"General\"];o.push([i,d.wallpaperPlugin,d.readConfig(\"Image\",\"\")]);}print(JSON.stringify(o));";
-
-fn wallpaper_of_internal(internal: &str) -> Result<String, String> {
-    let c = Connection::session().map_err(|e| format!("no session bus ({})", e))?;
-    let l = plasma_layout(&c)?;
-    let int = if l.screens.len() == 1 { l.screens[0].0 } else { pick_screens(&l, &kscreen_names(), internal)?.0 };
-    let s = plasma_eval(&c, WALL_JS)?;
-    let v: serde_json::Value = serde_json::from_str(s.trim()).map_err(|_| "wallpaper script output not understood".to_string())?;
-    for e in v.as_array().cloned().unwrap_or_default() {
-        if e.get(0).and_then(|x| x.as_i64()) == Some(int as i64) {
-            let plugin = e.get(1).and_then(|x| x.as_str()).unwrap_or("");
-            let img = e.get(2).and_then(|x| x.as_str()).unwrap_or("");
-            if plugin != "org.kde.image" {
-                return Err(format!("wallpaper plugin {} (only org.kde.image)", plugin));
-            }
-            if img.is_empty() {
-                // Plasma leaves the default unset: the default package
-                for d in ["/usr/share/wallpapers/Next", "/usr/share/wallpapers/Fedora"] {
-                    if Path::new(d).is_dir() {
-                        return Ok(d.into());
-                    }
-                }
-                return Err("no Image set and no default package".into());
-            }
-            return Ok(img.to_string());
-        }
-    }
-    Err(format!("no desktop for screen {}", int))
+    (d, note)
 }
 
 #[cfg(test)]

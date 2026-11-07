@@ -77,12 +77,11 @@ dwt_ms = 300
 pen_pause = true
 # Look: "desktop" (KDE: colour scheme, panel opacity / blur, corner radius from the desktop; elsewhere like "auto"),
 # "dark", "light", "amoled", "auto" (follow the light / dark preference); accent colour; key opacity %; status
-# text in the bar; wallpaper = the desktop wallpaper of the tablet screen behind the keys (PNG / JPEG).
+# text in the bar.
 theme = "desktop"
 accent = "#4a8be0"
 key_alpha = 100
 status_info = true
-wallpaper = false
 
 # M2.1 input behaviour. Keys: a pending key's 150 ms hold restarts after key_slop_mm of movement, sliding off a key
 # needs key_slop_mm beyond its edge; a cancelled lone modifier is released behind a neutral key ("UNKNOWN", "F24"

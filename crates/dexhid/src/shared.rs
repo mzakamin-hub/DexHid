@@ -43,8 +43,8 @@ pub enum Cmd {
     XkbGroup(u32, Vec<String>),
     /// theme "auto": the desktop's scheme
     ThemeAuto(String),
-    /// M2.1 theme "desktop": the KDE look, the wallpaper path ("" = none), a log line
-    DeskLook(Option<dexhid_core::feedback::DeskLook>, String, String),
+    /// M2.1 theme "desktop": the KDE look, a log line
+    DeskLook(Option<dexhid_core::feedback::DeskLook>, String),
 }
 
 /// UI-side configuration (fixed at start)

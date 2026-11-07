@@ -119,8 +119,6 @@ pub struct Config {
     pub laptop_pad_width: u32,
     /// KDE: move the Plasma panels to the external monitor while in pad mode (restored on release)
     pub panels_follow: bool,
-    /// theme "desktop": draw the desktop wallpaper of the tablet screen behind the deck
-    pub wallpaper: bool,
     /// planned feature modules (stored and shown in the settings sheet; acted on from M3)
     pub features: Features,
 }
@@ -258,7 +256,6 @@ impl Default for Config {
             arrangement: "free".into(),
             laptop_pad_width: 100,
             panels_follow: true,
-            wallpaper: false,
             features: Features::default(),
         }
     }
@@ -302,6 +299,15 @@ pub fn save_settings(p: &Path, t: &toml::Table) -> Result<(), String> {
     std::fs::rename(&tmp, p).map_err(|e| format!("{}: {}", p.display(), e))
 }
 
+/// settings of removed features: still accepted in old files, dropped before the strict parse
+/// (`wallpaper`: the wallpaper behind the keys, removed by the owner's decision of 7 Nov 2026)
+pub const RETIRED_KEYS: &[&str] = &["wallpaper"];
+
+/// remove retired keys from a table; one note per key found
+pub fn strip_retired(t: &mut toml::Table) -> Vec<String> {
+    RETIRED_KEYS.iter().filter(|k| t.remove(**k).is_some()).map(|k| format!("NOTE retired setting `{}` ignored (feature removed)", k)).collect()
+}
+
 /// merge the config files plus the settings overrides into a Config (the settings come before `--config`, which is
 /// last in `paths`, so a test config still wins)
 pub fn load_with(paths: &[PathBuf], settings: &toml::Table, settings_before_last: bool) -> (Config, Vec<String>) {
@@ -327,6 +333,7 @@ pub fn load_with(paths: &[PathBuf], settings: &toml::Table, settings_before_last
     if !settings_before_last {
         merge(&mut t, settings.clone());
     }
+    notes.extend(strip_retired(&mut t));
     match Config::deserialize(toml::Value::Table(t)) {
         Ok(c) => (c, notes),
         Err(e) => {
@@ -376,6 +383,7 @@ pub fn load(paths: &[PathBuf]) -> (Config, Vec<String>) {
             Err(e) => notes.push(format!("ERROR config {}: {}", p.display(), e)),
         }
     }
+    notes.extend(strip_retired(&mut t));
     match Config::deserialize(toml::Value::Table(t.clone())) {
         Ok(c) => (c, notes),
         Err(e) => {
@@ -462,6 +470,25 @@ mod tests {
         assert!(!c.quick_actions.enabled);
         assert_eq!(c.quick_actions.actions, vec!["copy"], "deep merge keeps the sibling key");
         assert_eq!(c.autostart, "on", "--config (last) still wins over the settings");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn retired_wallpaper_key_is_ignored_with_one_note() {
+        let d = std::env::temp_dir().join(format!("dexhid-retired-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let user = d.join("config.toml");
+        std::fs::write(&user, "theme = \"desktop\"\nwallpaper = true\n").unwrap();
+        let mut s: toml::Table = toml::from_str("wallpaper = false\nspeed = 1.2\n").unwrap();
+        // the daemon strips the settings table first (so it is not written back), then merges
+        let n1 = strip_retired(&mut s);
+        assert_eq!(n1.len(), 1);
+        assert!(!s.contains_key("wallpaper") && s.contains_key("speed"));
+        let (c, notes) = load_with(&[user], &s, false);
+        assert!(notes.iter().all(|n| !n.starts_with("ERROR")), "{:?}", notes);
+        assert_eq!(notes.iter().filter(|n| n.contains("retired setting `wallpaper`")).count(), 1, "{:?}", notes);
+        assert_eq!(c.theme, "desktop");
+        assert_eq!(c.speed, 1.2);
         std::fs::remove_dir_all(&d).ok();
     }
 

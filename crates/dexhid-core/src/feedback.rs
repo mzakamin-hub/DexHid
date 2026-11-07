@@ -274,7 +274,7 @@ pub fn palette_desk(d: &DeskLook, key_alpha: u32) -> Palette {
         card: (d.window & 0x00ff_ffff) | 0xf800_0000,
     };
     if d.translucent {
-        // the panel material: translucent surfaces over the (wallpaper) background
+        // the panel material: translucent surfaces over the panel background
         p.strip = (p.strip & 0x00ff_ffff) | 0xd800_0000;
         p.pad = (p.pad & 0x00ff_ffff) | 0xd000_0000;
         p.zone = (p.zone & 0x00ff_ffff) | 0xd000_0000;

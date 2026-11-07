@@ -98,7 +98,6 @@ pub const DEFS: &[Def] = &[
     Def { key: "dim", module: "look", title: "Dim the tablet panel in pad mode", kind: Kind::Bool },
     Def { key: "dim_percent", module: "look", title: "Dim to (% of max)", kind: Kind::Num { min: 5.0, max: 80.0, step: 5.0, int: true } },
     Def { key: "theme", module: "look", title: "Theme", kind: Kind::Choice(&["desktop", "dark", "light", "amoled", "auto"]) },
-    Def { key: "wallpaper", module: "look", title: "Desktop wallpaper behind the keys", kind: Kind::Bool },
     Def { key: "accent", module: "look", title: "Accent colour", kind: Kind::Choice(&["#4a8be0", "#e0a030", "#40b070", "#d05a8a", "#9a7ae0"]) },
     Def { key: "key_alpha", module: "look", title: "Key opacity (%)", kind: Kind::Num { min: 30.0, max: 100.0, step: 10.0, int: true } },
     // palm

@@ -24,7 +24,6 @@ mod render;
 mod shared;
 mod sys;
 mod ui;
-mod wallpaper;
 mod xkb;
 
 /// M2.1: where the panel restore record lives ($XDG_STATE_HOME/dexhid/panels.json)
