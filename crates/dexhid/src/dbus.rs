@@ -70,6 +70,16 @@ impl Api {
         self.sh.send(Cmd::DebugConnector(connected));
         Ok("ok".into())
     }
+    /// `--debug` only (M2.1 test aid): log one line `DEBUG-NOTE <text>`; KWin test scripts report through it
+    /// (KWin 6.8 sends a script's print() to a debug category that is off by default, so it never reaches the journal)
+    fn debug_note(&self, text: &str) -> zbus::fdo::Result<String> {
+        if !self.sh.debug {
+            return Err(zbus::fdo::Error::AccessDenied("DebugNote needs `dexhid daemon --debug`".into()));
+        }
+        let t: String = text.chars().take(400).map(|c| if c.is_control() { ' ' } else { c }).collect();
+        println!("DEBUG-NOTE t={} {}", crate::sys::mono_ms(), t);
+        Ok("ok".into())
+    }
 }
 
 /// serve the API; returns the connection (keep it alive) or an error (e.g. the name is taken: another instance)

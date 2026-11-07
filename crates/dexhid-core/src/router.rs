@@ -870,7 +870,11 @@ impl Router {
             match k {
                 KeyOut::Key(c, p) => {
                     if p && Some(c) != self.cfg.mask_key {
-                        self.last_key_t = t;
+                        // M2.1 fix: like libinput, a modifier does not start disable-while-typing (Ctrl / Shift /
+                        // Super resting + a pad finger = Ctrl+click, Shift+drag, ...)
+                        if !crate::keycodes::is_modifier(c) {
+                            self.last_key_t = t;
+                        }
                         out.push(Out::KeyFeedback);
                     }
                     out.push(Out::Key(c, p))
@@ -1870,6 +1874,15 @@ mod tests {
         up(&mut r, 7, 3010);
         r.set_pen(false);
         assert!(down(&mut r, 8, c, 4000).iter().any(|x| matches!(x, Out::Pad(_))));
+        up(&mut r, 8, 4010);
+        // M2.1 fix: a resting modifier does not start dwt (Ctrl held + a pad finger 80 ms later moves the pointer)
+        let ctrl = at(&r, "key.KEY_LEFTCTRL");
+        let o = down(&mut r, 9, ctrl, 5000);
+        assert!(keys(&o).contains(&(29, true)), "Ctrl pressed at once");
+        let o = down(&mut r, 10, c, 5080);
+        assert!(o.iter().any(|x| matches!(x, Out::Pad(_))), "pad finger with Ctrl held: {:?}", o);
+        up(&mut r, 10, 5200);
+        up(&mut r, 9, 5250);
     }
 
     #[test]

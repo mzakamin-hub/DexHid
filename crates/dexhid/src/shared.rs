@@ -21,7 +21,8 @@ pub enum Cmd {
     PillUsePad,
     PillHide,
     Geometry(Geometry),
-    Mapped(UiKind),
+    /// the surface of this kind and epoch is on screen
+    Mapped(UiKind, u64),
     Outputs(Vec<String>),
     UiLost(String),
     Labels(usize),
@@ -64,8 +65,8 @@ pub struct Shared {
     pub wake_core: i32,
     /// write end of the UI's wake pipe
     pub wake_ui: i32,
-    /// what the UI shows + the model; `ui_ver` bumps on every change
-    pub ui: Mutex<(UiKind, UiModel)>,
+    /// what the UI shows + the model + the surface epoch (bumps on every kind change); `ui_ver` bumps on every change
+    pub ui: Mutex<(UiKind, UiModel, u64)>,
     pub ui_ver: AtomicU64,
     /// last UI loop iteration (CLOCK_MONOTONIC ms), for the watchdog
     pub ui_heartbeat: AtomicI64,
@@ -83,8 +84,8 @@ impl Shared {
         let _ = self.tx.send(c);
         crate::sys::poke(self.wake_core);
     }
-    pub fn publish_ui(&self, kind: UiKind, model: &UiModel) {
-        *self.ui.lock().unwrap() = (kind, model.clone());
+    pub fn publish_ui(&self, kind: UiKind, model: &UiModel, epoch: u64) {
+        *self.ui.lock().unwrap() = (kind, model.clone(), epoch);
         self.ui_ver.fetch_add(1, Ordering::SeqCst);
         crate::sys::poke(self.wake_ui);
     }

@@ -32,11 +32,32 @@ pub enum Job {
 
 pub struct Worker {
     tx: Sender<Job>,
+    /// M2.1 fix: the KWin applier has its own thread. It may wait up to 3 s for KWin to register a new device; on
+    /// the shared thread that wait delayed the dimming, its restore, the desktop look and the panel moves by
+    /// seconds (T7e, M2.1-9 and M2.1-8 of the first M2.1 run).
+    kwin_tx: Sender<Job>,
 }
 
 impl Worker {
     pub fn start(sh: SharedRef) -> Worker {
         let (tx, rx) = channel::<Job>();
+        let (kwin_tx, kwin_rx) = channel::<Job>();
+        let sh2 = sh.clone();
+        std::thread::Builder::new()
+            .name("kwin-apply".into())
+            .spawn(move || {
+                while let Ok(mut j) = kwin_rx.recv() {
+                    // only the newest request counts (the touchpad is recreated often: older nodes are gone)
+                    while let Ok(n) = kwin_rx.try_recv() {
+                        j = n;
+                    }
+                    if let Job::KwinPad { node, natural_scroll, tap, accel } = j {
+                        let r = kwin_apply(&node, &[("naturalScroll", Value::from(natural_scroll)), ("tapToClick", Value::from(tap)), ("pointerAcceleration", Value::from(accel))]);
+                        sh2.send(Cmd::Note(r));
+                    }
+                }
+            })
+            .expect("kwin thread");
         std::thread::Builder::new()
             .name("desktop".into())
             .spawn(move || {
@@ -44,10 +65,7 @@ impl Worker {
                 let click = sound_file();
                 while let Ok(j) = rx.recv() {
                     match j {
-                        Job::KwinPad { node, natural_scroll, tap, accel } => {
-                            let r = kwin_apply(&node, &[("naturalScroll", Value::from(natural_scroll)), ("tapToClick", Value::from(tap)), ("pointerAcceleration", Value::from(accel))]);
-                            sh.send(Cmd::Note(r));
-                        }
+                        Job::KwinPad { .. } => {}
                         Job::Dim { backlight, percent } => sh.send(Cmd::Note(dim(&backlight, percent))),
                         Job::Restore => sh.send(Cmd::Note(restore())),
                         Job::ThemeAuto => {
@@ -76,10 +94,10 @@ impl Worker {
                 }
             })
             .expect("desktop thread");
-        Worker { tx }
+        Worker { tx, kwin_tx }
     }
     pub fn send(&self, j: Job) {
-        let _ = self.tx.send(j);
+        let _ = if matches!(j, Job::KwinPad { .. }) { self.kwin_tx.send(j) } else { self.tx.send(j) };
     }
 }
 
@@ -99,6 +117,10 @@ pub fn kwin_apply(node: &str, props: &[(&str, Value)]) -> String {
     let path = format!("/org/kde/KWin/InputDevice/{}", node);
     let mut ok = false;
     for _ in 0..30 {
+        // M2.1 fix: a node that is gone (or reused by another device) is not waited for
+        if !is_dexhid_node(node) {
+            return format!("KWIN-SET skipped t={}: {} is no DexHid device any more (recreated meanwhile)", crate::sys::mono_ms(), node);
+        }
         if kwin_get(&c, &path, "name").is_some() {
             ok = true;
             break;
@@ -106,7 +128,7 @@ pub fn kwin_apply(node: &str, props: &[(&str, Value)]) -> String {
         std::thread::sleep(Duration::from_millis(100));
     }
     if !ok {
-        return format!("KWIN-SET skipped: {} not found (not KWin, or the device is not registered)", path);
+        return format!("KWIN-SET skipped t={}: {} not found (not KWin, or the device is not registered)", crate::sys::mono_ms(), path);
     }
     let mut parts = vec![];
     for (p, v) in props {
@@ -120,11 +142,34 @@ pub fn kwin_apply(node: &str, props: &[(&str, Value)]) -> String {
             parts.push(format!("{}=unchanged", p));
             continue;
         }
+        // a zvariant Value is sent as the variant Set expects (b for the switches, d for pointerAcceleration: the
+        // run's read-back showed both types are accepted)
         let r = c.call_method(Some("org.kde.KWin"), path.as_str(), Some("org.freedesktop.DBus.Properties"), "Set", &("org.kde.KWin.InputDevice", *p, v));
-        let back = kwin_get(&c, &path, p).map(|v| format!("{:?}", v)).unwrap_or_else(|| "?".into());
-        parts.push(format!("{}={}{}", p, back.replace("OwnedValue(", "").trim_end_matches(')'), if r.is_err() { "(set failed)" } else { "" }));
+        // M2.1 fix: the read-back as a plain value ("true", "0.5"); the Debug form ("Bool(true") broke the log checks
+        let back = kwin_get(&c, &path, p).map(|v| plain(&v)).unwrap_or_else(|| "?".into());
+        parts.push(format!("{}={}{}", p, back, if let Err(e) = &r { format!("(set failed: {})", e) } else { String::new() }));
     }
-    format!("KWIN-SET node={} {}", node, parts.join(" "))
+    format!("KWIN-SET t={} node={} {}", crate::sys::mono_ms(), node, parts.join(" "))
+}
+
+/// a D-Bus value as plain text: true / false / 0.5 / text
+fn plain(v: &Value) -> String {
+    match v {
+        Value::Bool(b) => b.to_string(),
+        Value::F64(f) => format!("{}", f),
+        Value::I32(i) => i.to_string(),
+        Value::U32(i) => i.to_string(),
+        Value::I64(i) => i.to_string(),
+        Value::U64(i) => i.to_string(),
+        Value::Str(s) => s.to_string(),
+        Value::Value(b) => plain(b),
+        o => format!("{:?}", o),
+    }
+}
+
+/// /dev/input/<node> is (still) one of DexHid's virtual devices
+fn is_dexhid_node(node: &str) -> bool {
+    std::fs::read_to_string(format!("/sys/class/input/{}/device/name", node)).map(|n| n.trim().starts_with("dexhid ")).unwrap_or(false)
 }
 
 // ------------------------------------------------------------------ backlight

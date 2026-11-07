@@ -25,6 +25,8 @@
     <method name="RunQuick"><arg name="id" type="s" direction="in"/><arg type="s" direction="out"/></method>
     <!-- tests without a monitor: only when the daemon runs with --debug, AccessDenied otherwise -->
     <method name="DebugConnector"><arg name="connected" type="b" direction="in"/><arg type="s" direction="out"/></method>
+    <!-- debug only: log "DEBUG-NOTE <text>" (KWin test scripts report through it) -->
+    <method name="DebugNote"><arg name="text" type="s" direction="in"/><arg type="s" direction="out"/></method>
     <!-- desired state: idle, offer, pad, display, hidden -->
     <signal name="StateChanged"><arg name="state" type="s"/></signal>
   </interface>

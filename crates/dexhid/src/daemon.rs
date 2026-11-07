@@ -126,6 +126,8 @@ struct D {
     outputs: Vec<String>,
     mapped: UiKind,
     published: (UiKind, u64),
+    /// surface epoch: bumps on every UI kind change (the UI makes a fresh surface for each epoch)
+    ui_epoch: u64,
     model_dirty: bool,
     reason: String,
     notify: Notify,
@@ -227,7 +229,7 @@ pub fn run(opts: Opts) -> i32 {
         tx,
         wake_core: wake_wr,
         wake_ui: ui_wr,
-        ui: std::sync::Mutex::new((UiKind::None, Default::default())),
+        ui: std::sync::Mutex::new((UiKind::None, Default::default(), 0)),
         ui_ver: Default::default(),
         ui_heartbeat: std::sync::atomic::AtomicI64::new(mono_ms()),
         status: std::sync::Mutex::new("{}".into()),
@@ -366,6 +368,7 @@ pub fn run(opts: Opts) -> i32 {
         outputs: vec![],
         mapped: UiKind::None,
         published: (UiKind::None, 0),
+        ui_epoch: 0,
         model_dirty: true,
         reason: "start".into(),
         notify,
@@ -846,8 +849,9 @@ impl D {
                 let o = self.router.set_geometry(g);
                 self.apply(o);
             }
-            Cmd::Mapped(k) => {
-                if k == self.published.0 {
+            Cmd::Mapped(k, ep) => {
+                // a map of an older surface (same kind, earlier epoch) does not count
+                if k == self.published.0 && ep == self.ui_epoch {
                     self.mapped = k;
                 }
             }
@@ -1255,13 +1259,14 @@ impl D {
         if self.published.0 != e.ui || self.model_dirty {
             if self.published.0 != e.ui {
                 self.mapped = UiKind::None;
+                self.ui_epoch += 1;
             }
             if self.model_dirty && model_ver != self.published.1 && e.ui == UiKind::Overlay {
                 self.print_geom();
             }
             self.published = (e.ui, model_ver);
             self.model_dirty = false;
-            self.sh.publish_ui(e.ui, self.router.model());
+            self.sh.publish_ui(e.ui, self.router.model(), self.ui_epoch);
         }
     }
 
