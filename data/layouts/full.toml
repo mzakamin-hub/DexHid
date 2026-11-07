@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# DexHid layout: full PC keyboard (ANSI, 16 units wide), function row optional ("function", on by default),
+# numeric keypad optional ("numpad", off by default; it gets its own movable region).
+# Keys send evdev codes: the desktop's xkb layout decides what they type; symbol legends follow it.
+name = "full"
+title = "Full PC keyboard"
+description = "Function row, Esc, Tab, Ctrl/Alt/Meta, arrows, Home/End/PgUp/PgDn, Ins/Del, optional numpad"
+
+[[part]]
+region = "keyboard"
+
+[[part.page]]
+id = "main"
+
+[[part.page.row]]
+height = 0.75
+optional = "function"
+keys = [
+  { key = "ESC" },
+  { key = "F1" }, { key = "F2" }, { key = "F3" }, { key = "F4" },
+  { key = "F5" }, { key = "F6" }, { key = "F7" }, { key = "F8" },
+  { key = "F9" }, { key = "F10" }, { key = "F11" }, { key = "F12" },
+  { key = "SYSRQ" }, { key = "INSERT" }, { key = "DELETE" },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "GRAVE" }, { key = "1" }, { key = "2" }, { key = "3" }, { key = "4" }, { key = "5" }, { key = "6" },
+  { key = "7" }, { key = "8" }, { key = "9" }, { key = "0" }, { key = "MINUS" }, { key = "EQUAL" },
+  { key = "BACKSPACE", w = 2 }, { key = "HOME" },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "TAB", w = 1.5 },
+  { key = "Q" }, { key = "W" }, { key = "E" }, { key = "R" }, { key = "T" },
+  { key = "Y" }, { key = "U" }, { key = "I" }, { key = "O" }, { key = "P" },
+  { key = "LEFTBRACE" }, { key = "RIGHTBRACE" }, { key = "BACKSLASH", w = 1.5 }, { key = "PAGEUP" },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "CAPSLOCK", w = 1.75 },
+  { key = "A" }, { key = "S" }, { key = "D" }, { key = "F" }, { key = "G" },
+  { key = "H" }, { key = "J" }, { key = "K" }, { key = "L" },
+  { key = "SEMICOLON" }, { key = "APOSTROPHE" }, { key = "ENTER", w = 2.25 }, { key = "PAGEDOWN" },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "LEFTSHIFT", w = 2.25 },
+  { key = "Z" }, { key = "X" }, { key = "C" }, { key = "V" }, { key = "B" }, { key = "N" }, { key = "M" },
+  { key = "COMMA" }, { key = "DOT" }, { key = "SLASH" },
+  { key = "RIGHTSHIFT", w = 1.75 }, { key = "UP" }, { key = "END" },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "LEFTCTRL", w = 1.25 }, { key = "LEFTMETA", w = 1.25 }, { key = "LEFTALT", w = 1.25 },
+  { key = "SPACE", w = 6.75 },
+  { key = "RIGHTALT", w = 1.25 }, { key = "RIGHTCTRL", w = 1.25 },
+  { key = "LEFT" }, { key = "DOWN" }, { key = "RIGHT" },
+]
+
+[[part]]
+region = "numpad"
+optional = "numpad"
+
+[[part.page]]
+id = "main"
+
+[[part.page.row]]
+keys = [ { key = "NUMLOCK" }, { key = "KPSLASH" }, { key = "KPASTERISK" }, { key = "KPMINUS" } ]
+
+[[part.page.row]]
+keys = [ { key = "KP7" }, { key = "KP8" }, { key = "KP9" }, { key = "KPPLUS" } ]
+
+[[part.page.row]]
+keys = [ { key = "KP4" }, { key = "KP5" }, { key = "KP6" }, { key = "KPPLUS" } ]
+
+[[part.page.row]]
+keys = [ { key = "KP1" }, { key = "KP2" }, { key = "KP3" }, { key = "KPENTER" } ]
+
+[[part.page.row]]
+keys = [ { key = "KP0", w = 2 }, { key = "KPDOT" }, { key = "KPENTER" } ]

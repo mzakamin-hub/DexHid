@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# DexHid configuration example. Copy to ~/.config/dexhid/config.toml (or /etc/dexhid/config.toml) and keep only
+# the keys you change. Merge order: built-in defaults, /usr/share/dexhid/devices/<matching preset>.toml,
+# /etc/dexhid/config.toml, ~/.config/dexhid/config.toml, then `dexhid daemon --config <file>`.
+
+# What happens when an external display is plugged in: "ask" (prompt on the tablet), "on", "off".
+autostart = "ask"
+
+# The internal touchscreen (evdev name) and output (wl_output name, or "auto" = first DSI / eDP / LVDS output).
+touchscreen = "NVTCapacitiveTouchScreen"
+internal_output = "auto"
+# Panel size in mm in its native orientation (sets the touchpad resolution and key sizes).
+size_mm = [274.0, 193.0]
+
+# DRM connectors that count as an external display (wildcards * and ?).
+external_connectors = ["DP-*", "HDMI-*", "USB-C-*"]
+plug_debounce_ms = 1500
+require_compositor_output = true
+
+# Keyboard layout: "full" (PC), "tablet" (letters + symbols page), "split", "none" (touchpad only),
+# or the name of a layout file in ~/.local/share/dexhid/layouts/ or /usr/share/dexhid/layouts/.
+keyboard = "full"
+# Optional rows / parts: "function" (F-key row), "numpad" (numeric keypad region of the full layout).
+keyboard_options = ["function"]
+# xkb layout group used for the key legends.
+xkb_layout_index = 0
+
+# Emergency release: hold these keys this long (read passively, never grabbed).
+release_chord = ["KEY_VOLUMEUP", "KEY_VOLUMEDOWN"]
+release_hold_ms = 2000
+# Five fingers held still for 0.8 s anywhere also release.
+five_finger_release = true
+
+# Touchpad: click zones at the bottom of the pad (left / right button), pointer speed factor, palm threshold.
+click_zones = true
+click_zone_mm = 14.0
+speed = 1.0
+palm_major = 0
+
+# Keys: hold delay before a held key presses (the desktop then repeats it), gap between keys.
+hold_ms = 150
+key_gap_mm = 1.2
+strip_mm = 11.0
+
+# Show a small "Use as pad" pill while the monitor is used as a plain display.
+display_pill = true
+
+# Planned (M2): offer the touchpad-only layout while a physical keyboard is attached.
+pad_only_with_physical_keyboard = false
+theme = "dark"

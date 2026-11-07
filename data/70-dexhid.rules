@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# DexHid: give the active seat's user access to /dev/uinput, the internal touchscreen and the volume-key devices
+# (read passively for the release chord). Must sort before 73-seat-late.rules, which applies "uaccess".
+# Security note: uaccess on the touchscreen lets any process of the active user read the panel's touches; limited
+# here to the touchscreen named by the device preset. M3 option: the dexhid-broker (plan §2 Security).
+
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
+
+# device presets set DEXHID_INTERNAL / DEXHID_CHORD
+# OnePlus Pad 4 (iceland)
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="NVTCapacitiveTouchScreen", ENV{DEXHID_INTERNAL}="1"
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="pmic_resin", ENV{DEXHID_CHORD}="1"
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="gpio-keys", ENV{DEXHID_CHORD}="1"
+
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_TOUCHSCREEN}=="1", ENV{DEXHID_INTERNAL}=="1", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event*", ENV{DEXHID_CHORD}=="1", TAG+="uaccess"

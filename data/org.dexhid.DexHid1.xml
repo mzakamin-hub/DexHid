@@ -1,0 +1,24 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<!-- SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+     DexHid session-bus API. Bus name org.dexhid.DexHid1, object /org/dexhid/DexHid1. This is the contract the
+     CLI, desktop plugins and window-manager key bindings use. Methods return "ok" at once; the effect is visible
+     in Status() and the StateChanged signal. -->
+<node>
+  <interface name="org.dexhid.DexHid1">
+    <!-- pad <-> display; needs a connected external display -->
+    <method name="Toggle"><arg type="s" direction="out"/></method>
+    <!-- leave pad mode: ungrab, devices gone; the monitor stays a display -->
+    <method name="Release"><arg type="s" direction="out"/></method>
+    <!-- enter pad mode again -->
+    <method name="Resume"><arg type="s" direction="out"/></method>
+    <!-- JSON: state, grab, grabbed, ui, connected, paused, layout, layouts, orientation, edit, nodes, last_reason -->
+    <method name="Status"><arg type="s" direction="out"/></method>
+    <!-- keyboard layout by name (full, tablet, split, none, or a user layout file) -->
+    <method name="SetLayout"><arg name="name" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <!-- tests without a monitor: only when the daemon runs with --debug, AccessDenied otherwise -->
+    <method name="DebugConnector"><arg name="connected" type="b" direction="in"/><arg type="s" direction="out"/></method>
+    <!-- desired state: idle, offer, pad, display, hidden -->
+    <signal name="StateChanged"><arg name="state" type="s"/></signal>
+  </interface>
+</node>

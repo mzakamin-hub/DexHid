@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# DexHid layout: split keyboard, two halves at the screen edges with the touchpad in the middle.
+# Each half is its own region: move / resize them independently in edit mode.
+name = "split"
+title = "Split keyboard"
+description = "Two halves at the edges, touchpad in the middle"
+
+[[part]]
+region = "keyboard_left"
+
+[[part.page]]
+id = "main"
+
+[[part.page.row]]
+keys = [ { key = "ESC" }, { key = "1" }, { key = "2" }, { key = "3" }, { key = "4" }, { key = "5" } ]
+
+[[part.page.row]]
+keys = [ { key = "TAB", w = 1.5 }, { key = "Q" }, { key = "W" }, { key = "E" }, { key = "R" }, { key = "T" } ]
+
+[[part.page.row]]
+keys = [ { key = "CAPSLOCK", w = 1.5 }, { key = "A" }, { key = "S" }, { key = "D" }, { key = "F" }, { key = "G" } ]
+
+[[part.page.row]]
+keys = [ { key = "LEFTSHIFT", w = 1.5 }, { key = "Z" }, { key = "X" }, { key = "C" }, { key = "V" }, { key = "B" } ]
+
+[[part.page.row]]
+keys = [
+  { key = "LEFTCTRL", w = 1.25 }, { key = "LEFTMETA" }, { key = "LEFTALT" }, { key = "GRAVE" },
+  { key = "SPACE", w = 2.25 },
+]
+
+[[part]]
+region = "keyboard_right"
+
+[[part.page]]
+id = "main"
+
+[[part.page.row]]
+keys = [
+  { key = "6" }, { key = "7" }, { key = "8" }, { key = "9" }, { key = "0" }, { key = "MINUS" }, { key = "EQUAL" },
+  { key = "BACKSPACE", label = "⌫" },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "Y" }, { key = "U" }, { key = "I" }, { key = "O" }, { key = "P" },
+  { key = "LEFTBRACE" }, { key = "RIGHTBRACE" }, { key = "BACKSLASH" },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "H" }, { key = "J" }, { key = "K" }, { key = "L" }, { key = "SEMICOLON" }, { key = "APOSTROPHE" },
+  { key = "ENTER", w = 2 },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "N" }, { key = "M" }, { key = "COMMA" }, { key = "DOT" }, { key = "SLASH" },
+  { key = "RIGHTSHIFT", w = 2 }, { key = "UP" },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "SPACE", w = 2.5 }, { key = "RIGHTALT" }, { key = "LEFT" }, { key = "DOWN" }, { key = "RIGHT" },
+  { key = "DELETE", w = 1.5 },
+]

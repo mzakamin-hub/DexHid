@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+//! Session-bus API `org.dexhid.DexHid1` at /org/dexhid/DexHid1 (see data/org.dexhid.DexHid1.xml) and the CLI client.
+//! Methods return at once with a short text; the effect shows in Status() and the StateChanged signal.
+
+use crate::shared::{Cmd, SharedRef};
+
+pub const NAME: &str = "org.dexhid.DexHid1";
+pub const PATH: &str = "/org/dexhid/DexHid1";
+
+pub struct Api {
+    pub sh: SharedRef,
+}
+
+#[zbus::interface(name = "org.dexhid.DexHid1")]
+impl Api {
+    /// pad <-> display (needs a connected external display)
+    fn toggle(&self) -> String {
+        self.sh.send(Cmd::Toggle("dbus".into()));
+        "ok".into()
+    }
+    /// leave pad mode (the monitor stays a display)
+    fn release(&self) -> String {
+        self.sh.send(Cmd::Release("dbus".into()));
+        "ok".into()
+    }
+    /// enter pad mode again
+    fn resume(&self) -> String {
+        self.sh.send(Cmd::Resume("dbus".into()));
+        "ok".into()
+    }
+    /// JSON
+    fn status(&self) -> String {
+        self.sh.status.lock().unwrap().clone()
+    }
+    fn set_layout(&self, name: &str) -> zbus::fdo::Result<String> {
+        let names = self.sh.layout_names.lock().unwrap().clone();
+        if !names.iter().any(|n| n == name) {
+            return Err(zbus::fdo::Error::InvalidArgs(format!("unknown layout {:?} (have: {})", name, names.join(", "))));
+        }
+        self.sh.send(Cmd::SetLayout(name.to_string()));
+        Ok("ok".into())
+    }
+    /// debug builds / `--debug` only: act as if an external display was (dis)connected (tests without a monitor)
+    fn debug_connector(&self, connected: bool) -> zbus::fdo::Result<String> {
+        if !self.sh.debug {
+            return Err(zbus::fdo::Error::AccessDenied("DebugConnector needs `dexhid daemon --debug`".into()));
+        }
+        self.sh.send(Cmd::DebugConnector(connected));
+        Ok("ok".into())
+    }
+}
+
+/// serve the API; returns the connection (keep it alive) or an error (e.g. the name is taken: another instance)
+/// Err starting with "TAKEN" = another instance owns the name (no queueing, no replacement either way)
+pub fn serve(sh: SharedRef) -> Result<zbus::blocking::Connection, String> {
+    use zbus::fdo::{RequestNameFlags, RequestNameReply};
+    let api = Api { sh };
+    let c = zbus::blocking::connection::Builder::session()
+        .and_then(|b| b.serve_at(PATH, api))
+        .and_then(|b| b.build())
+        .map_err(|e| format!("session bus: {}", e))?;
+    match c.request_name_with_flags(NAME, RequestNameFlags::DoNotQueue.into()) {
+        Ok(RequestNameReply::PrimaryOwner) | Ok(RequestNameReply::AlreadyOwner) => Ok(c),
+        Ok(r) => Err(format!("TAKEN {} ({:?})", NAME, r)),
+        Err(zbus::Error::NameTaken) => Err(format!("TAKEN {}", NAME)),
+        Err(e) => Err(format!("request name {}: {}", NAME, e)),
+    }
+}
+
+pub fn emit_state(conn: &zbus::blocking::Connection, state: &str) {
+    let _ = conn.emit_signal(None::<&str>, PATH, NAME, "StateChanged", &(state,));
+}
+
+/// CLI: call a method of the running daemon
+pub fn call(method: &str, arg: Option<&str>) -> Result<String, String> {
+    let c = zbus::blocking::Connection::session().map_err(|e| format!("session bus: {}", e))?;
+    let r = match (method, arg) {
+        ("DebugConnector", Some(a)) => c.call_method(Some(NAME), PATH, Some(NAME), method, &(a == "connect",)),
+        (_, Some(a)) => c.call_method(Some(NAME), PATH, Some(NAME), method, &(a,)),
+        (_, None) => c.call_method(Some(NAME), PATH, Some(NAME), method, &()),
+    }
+    .map_err(|e| {
+        let s = e.to_string();
+        let hint = if s.contains("ServiceUnknown") || s.contains("NameHasNoOwner") { " (is `dexhid daemon` running?)" } else { "" };
+        format!("{}: {}{}", method, s, hint)
+    })?;
+    r.body().deserialize::<String>().map_err(|e| e.to_string())
+}

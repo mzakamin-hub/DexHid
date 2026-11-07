@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# DexHid user service: the tablet screen as touchpad + keyboard while an external display is connected.
+# Disabled upstream by default; a device preset package (e.g. iceland) enables it:
+#   systemctl --user enable dexhid.service
+[Unit]
+Description=DexHid: tablet screen as touchpad and keyboard for an external display
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/bin/dexhid daemon
+# M2: restores the panel brightness if dexhid died while dimming (a no-op in M1)
+ExecStopPost=/usr/bin/dexhid --restore
+# hang: no WATCHDOG=1 for 5 s -> SIGABRT, then SIGKILL after 3 s (also kills a stopped process);
+# the kernel releases the grab and the virtual devices either way
+WatchdogSec=5
+TimeoutAbortSec=3
+Restart=on-failure
+RestartSec=2
+Nice=-5
+# an optional drop-in may add CPUSchedulingPolicy=fifo / CPUSchedulingPriority=10 for the input thread
+
+[Install]
+WantedBy=graphical-session.target

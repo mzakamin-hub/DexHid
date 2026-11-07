@@ -1,0 +1,10 @@
+[Desktop Entry]
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# XDG-autostart fallback for sessions without graphical-session.target: starts the user unit.
+Type=Application
+Name=DexHid
+Comment=Tablet screen as touchpad and keyboard for an external display
+Exec=systemctl --user start dexhid.service
+NoDisplay=true
+X-GNOME-Autostart-Phase=Applications
+X-systemd-skip=true

@@ -1,0 +1,318 @@
+// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+//! `dexhid debug ...`: test tools for the tablet runner (root). Not used by the daemon.
+//!   list                                   input devices and their roles
+//!   grabtest --dev P                       FREE / BUSY (+ active slots)
+//!   replay --fifo F [--clone P] [--name N] [--secs S]
+//!                                          replay touchscreen driven by commands written to the FIFO
+//!   volsim --fifo F [--keys K1+K2] [--secs S]
+//!                                          virtual volume keys (the daemon grabs it via --chord-test-dev)
+//! FIFO commands (one per line, several per line with ';'), coordinates in native touch units:
+//!   tap X Y [MS] | hold X Y MS | drag X0 Y0 X1 Y1 MS | press S X Y | moveto S X Y | release S
+//!   multi N X Y DX MS (N fingers DX apart, held MS) | down CODE.. | up CODE.. (volsim) | sleep MS | mark ID | quit
+
+use crate::devices::{create_replay_ts, Ts};
+use crate::sys::*;
+
+pub struct Args(pub Vec<String>);
+impl Args {
+    pub fn val(&self, k: &str) -> Option<String> {
+        self.0.iter().position(|a| a == k).and_then(|i| self.0.get(i + 1)).cloned()
+    }
+    pub fn flag(&self, k: &str) -> bool {
+        self.0.iter().any(|a| a == k)
+    }
+    pub fn f64(&self, k: &str, d: f64) -> f64 {
+        self.val(k).and_then(|v| v.parse().ok()).unwrap_or(d)
+    }
+}
+
+pub fn run(a: &Args) -> i32 {
+    match a.0.first().map(|s| s.as_str()) {
+        Some("list") => list(),
+        Some("grabtest") => grabtest(a),
+        Some("replay") => replay(a),
+        Some("volsim") => volsim(a),
+        Some("render") => crate::ui::render_debug(a),
+        _ => {
+            eprintln!("usage: dexhid debug list | grabtest --dev P | replay --fifo F [--clone P] [--name N] [--secs S] | volsim --fifo F [--keys K1+K2] [--secs S]");
+            2
+        }
+    }
+}
+
+fn list() -> i32 {
+    for p in event_nodes() {
+        let Ok(d) = Dev::open(&p, false) else {
+            println!("DEV path={} open=failed", p);
+            continue;
+        };
+        let props = d.props();
+        let mt = d.has_abs(ABS_MT_POSITION_X);
+        println!(
+            "DEV path={} name=\"{}\" direct={} pointer={} mt={} volup={} voldown={} active={}",
+            p,
+            d.name(),
+            test_bit(&props, INPUT_PROP_DIRECT as usize),
+            test_bit(&props, INPUT_PROP_POINTER as usize),
+            mt,
+            d.has_key(KEY_VOLUMEUP),
+            d.has_key(KEY_VOLUMEDOWN),
+            d.active_slots().map(|n| n.to_string()).unwrap_or_else(|| "-".into())
+        );
+    }
+    0
+}
+
+fn grabtest(a: &Args) -> i32 {
+    let Some(p) = a.val("--dev") else {
+        println!("GRABTEST result=ERR no --dev");
+        return 1;
+    };
+    let d = match Dev::open(&p, false) {
+        Ok(d) => d,
+        Err(e) => {
+            println!("GRABTEST dev={} result=ERR open: {}", p, strerr(e));
+            return 1;
+        }
+    };
+    let slots = d.active_slots().map(|n| n.to_string()).unwrap_or_else(|| "n/a".into());
+    match d.grab(true) {
+        Ok(()) => {
+            let _ = d.grab(false);
+            println!("GRABTEST dev={} result=FREE active_slots={}", p, slots);
+            0
+        }
+        Err(e) if e == libc::EBUSY => {
+            println!("GRABTEST dev={} result=BUSY active_slots={}", p, slots);
+            2
+        }
+        Err(e) => {
+            println!("GRABTEST dev={} result=ERR {}", p, strerr(e));
+            1
+        }
+    }
+}
+
+/// open a FIFO for reading without ever seeing EOF (we hold a write end too)
+fn open_fifo(path: &str) -> Result<i32, String> {
+    let c = std::ffi::CString::new(path).unwrap();
+    if !std::path::Path::new(path).exists() && unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
+        return Err(format!("mkfifo {}: {}", path, strerr(errno())));
+    }
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+    if fd < 0 {
+        Err(format!("open {}: {}", path, strerr(errno())))
+    } else {
+        Ok(fd)
+    }
+}
+
+/// read command lines from the FIFO until the deadline; calls `f` for each command, which returns false to quit
+fn command_loop(fd: i32, secs: f64, mut f: impl FnMut(&[&str]) -> bool) -> &'static str {
+    let end = mono_ms() + (secs * 1000.0) as i64;
+    let mut buf = String::new();
+    loop {
+        if stopped() {
+            return "signal";
+        }
+        if mono_ms() >= end {
+            return "timeout";
+        }
+        let r = poll_in(&[fd], 100);
+        if !r[0] {
+            continue;
+        }
+        let mut b = [0u8; 4096];
+        let n = unsafe { libc::read(fd, b.as_mut_ptr() as *mut libc::c_void, b.len()) };
+        if n <= 0 {
+            continue;
+        }
+        buf.push_str(&String::from_utf8_lossy(&b[..n as usize]));
+        while let Some(i) = buf.find('\n') {
+            let line: String = buf.drain(..=i).collect();
+            for cmd in line.split(';') {
+                let w: Vec<&str> = cmd.split_whitespace().collect();
+                if w.is_empty() {
+                    continue;
+                }
+                if w[0] == "quit" {
+                    return "quit";
+                }
+                if w[0] == "mark" {
+                    println!("MARK {} t={}", w.get(1).unwrap_or(&"-"), mono_ms());
+                    continue;
+                }
+                if w[0] == "sleep" {
+                    sleep_ms(w.get(1).and_then(|v| v.parse().ok()).unwrap_or(0));
+                    continue;
+                }
+                if !f(&w) {
+                    return "quit";
+                }
+            }
+        }
+    }
+}
+
+struct Replay {
+    ts: Ts,
+    down: Vec<Option<(i32, i32)>>,
+}
+
+impl Replay {
+    fn frame(&mut self) {
+        let n = self.down.iter().filter(|d| d.is_some()).count();
+        let (x, y) = self.down.iter().flatten().next().copied().unwrap_or((0, 0));
+        self.ts.frame(n, x, y);
+    }
+    fn press(&mut self, s: usize, x: i32, y: i32) {
+        if s < self.down.len() {
+            self.ts.down(s as i32, x, y);
+            self.down[s] = Some((x, y));
+            self.frame();
+        }
+    }
+    fn moveto(&mut self, s: usize, x: i32, y: i32) {
+        if s < self.down.len() && self.down[s].is_some() {
+            self.ts.mv(s as i32, x, y);
+            self.down[s] = Some((x, y));
+            self.frame();
+        }
+    }
+    fn release(&mut self, s: usize) {
+        if s < self.down.len() && self.down[s].is_some() {
+            self.ts.up(s as i32);
+            self.down[s] = None;
+            self.frame();
+        }
+    }
+    fn release_all(&mut self) {
+        for s in 0..self.down.len() {
+            if self.down[s].is_some() {
+                self.ts.up(s as i32);
+                self.down[s] = None;
+            }
+        }
+        self.frame();
+    }
+}
+
+fn replay(a: &Args) -> i32 {
+    install_signals();
+    let Some(fifo) = a.val("--fifo") else {
+        println!("FAIL replay: no --fifo");
+        return 1;
+    };
+    let name = a.val("--name").unwrap_or_else(|| "dexhid-replay".into());
+    let ts = match create_replay_ts(&name, a.val("--clone").as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("FAIL replay: {}", e);
+            return 1;
+        }
+    };
+    let n = ts.slots.max(1) as usize;
+    println!("NODE {} name=\"{}\" slots={} xmax={} ymax={} t={}", ts.u.node, name, ts.slots, ts.xmax, ts.ymax, mono_ms());
+    let fd = match open_fifo(&fifo) {
+        Ok(fd) => fd,
+        Err(e) => {
+            println!("FAIL replay: {}", e);
+            return 1;
+        }
+    };
+    let mut r = Replay { ts, down: vec![None; n] };
+    let p = |w: &[&str], i: usize| -> i32 { w.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) as i32 };
+    let why = command_loop(fd, a.f64("--secs", 170.0).min(600.0), |w| {
+        println!("CMD t={} {}", mono_ms(), w.join(" "));
+        match w[0] {
+            "tap" => {
+                r.press(0, p(w, 1), p(w, 2));
+                sleep_ms(w.get(3).and_then(|v| v.parse().ok()).unwrap_or(60));
+                r.release(0);
+            }
+            "hold" => {
+                r.press(0, p(w, 1), p(w, 2));
+                sleep_ms(p(w, 3).max(0) as u64);
+                r.release(0);
+            }
+            "drag" => {
+                let (x0, y0, x1, y1, ms) = (p(w, 1), p(w, 2), p(w, 3), p(w, 4), p(w, 5).max(20));
+                let steps = (ms / 10).max(2);
+                r.press(0, x0, y0);
+                sleep_ms(30);
+                for i in 1..=steps {
+                    let f = i as f64 / steps as f64;
+                    r.moveto(0, x0 + ((x1 - x0) as f64 * f) as i32, y0 + ((y1 - y0) as f64 * f) as i32);
+                    sleep_ms(10);
+                }
+                sleep_ms(40);
+                r.release(0);
+            }
+            "press" => r.press(p(w, 1).max(0) as usize, p(w, 2), p(w, 3)),
+            "moveto" => r.moveto(p(w, 1).max(0) as usize, p(w, 2), p(w, 3)),
+            "release" => r.release(p(w, 1).max(0) as usize),
+            "multi" => {
+                let (k, x, y, dx, ms) = (p(w, 1).clamp(1, 10) as usize, p(w, 2), p(w, 3), p(w, 4), p(w, 5).max(0));
+                for i in 0..k {
+                    r.press(i, x + dx * i as i32, y);
+                    sleep_ms(15);
+                }
+                sleep_ms(ms as u64);
+                r.release_all();
+            }
+            other => println!("WARN unknown command {}", other),
+        }
+        true
+    });
+    r.release_all();
+    println!("REPLAY done t={} reason={}", mono_ms(), why);
+    0
+}
+
+fn volsim(a: &Args) -> i32 {
+    install_signals();
+    let Some(fifo) = a.val("--fifo") else {
+        println!("FAIL volsim: no --fifo");
+        return 1;
+    };
+    let keys: Vec<u16> = a.val("--keys").unwrap_or_else(|| "KEY_VOLUMEUP+KEY_VOLUMEDOWN".into()).split('+').filter_map(dexhid_core::keycodes::code).collect();
+    let u = match Uinput::create(&UinputSpec { name: "dexhid-volsim", keys: keys.clone(), abs: vec![], props: vec![] }) {
+        Ok(u) => u,
+        Err(e) => {
+            println!("FAIL volsim: {}", e);
+            return 1;
+        }
+    };
+    println!("NODE {} name=\"dexhid-volsim\" t={}", u.node, mono_ms());
+    let fd = match open_fifo(&fifo) {
+        Ok(fd) => fd,
+        Err(e) => {
+            println!("FAIL volsim: {}", e);
+            return 1;
+        }
+    };
+    let why = command_loop(fd, a.f64("--secs", 170.0).min(600.0), |w| {
+        let v = match w[0] {
+            "down" => 1,
+            "up" => 0,
+            other => {
+                println!("WARN unknown command {}", other);
+                return true;
+            }
+        };
+        for k in &w[1..] {
+            if let Some(c) = dexhid_core::keycodes::code(k) {
+                u.emit(EV_KEY, c, v);
+            }
+        }
+        u.syn();
+        println!("SIM t={} {} {}", mono_ms(), w[0], w[1..].join(" "));
+        true
+    });
+    for k in keys {
+        u.emit(EV_KEY, k, 0);
+    }
+    u.syn();
+    println!("VOLSIM done t={} reason={}", mono_ms(), why);
+    0
+}

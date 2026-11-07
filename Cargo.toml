@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL: the owner has not decided the licence yet;
+# change every header before the repository goes public)
+[workspace]
+resolver = "2"
+members = ["crates/dexhid-core", "crates/dexhid"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
