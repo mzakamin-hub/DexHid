@@ -79,6 +79,8 @@ struct KeyDef {
     w: Option<f32>,
     label: Option<String>,
     shift_label: Option<String>,
+    /// M2: long-press alternate (a key name, a chord "LEFTSHIFT+2" or an action)
+    long: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,13 +88,26 @@ pub enum Action {
     Page(String),
     LayoutNext,
     KeyboardHide,
+    /// M2: the Fn layer key (hold, or tap to lock)
+    Fn,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum KeyKind {
     Code(u16),
+    /// M2: one key that sends a chord (modifiers first), e.g. "LEFTSHIFT+2"
+    Combo(Vec<u16>),
     Action(Action),
     Gap,
+}
+
+/// a key spec: "A", "KEY_A", or a chord "LEFTSHIFT+2"
+pub fn parse_key(name: &str) -> Option<KeyKind> {
+    if name.contains('+') {
+        let v: Option<Vec<u16>> = name.split('+').map(|k| keycodes::code(k.trim())).collect();
+        return v.filter(|v| v.len() >= 2).map(KeyKind::Combo);
+    }
+    keycodes::code(name).map(KeyKind::Code)
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +116,7 @@ pub struct Key {
     pub w: f32,
     pub label: Option<String>,
     pub shift_label: Option<String>,
+    pub long: Option<KeyKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +157,7 @@ pub struct PlacedKey {
     pub label: Option<String>,
     pub shift_label: Option<String>,
     pub region: String,
+    pub long: Option<KeyKind>,
 }
 
 impl Layout {
@@ -189,8 +206,8 @@ impl Layout {
                             return err(format!("{}: width {} out of range", at, w));
                         }
                         let kind = if let Some(name) = &k.key {
-                            match keycodes::code(name) {
-                                Some(c) => KeyKind::Code(c),
+                            match parse_key(name) {
+                                Some(c) => c,
                                 None => return err(format!("{}: unknown key name {:?}", at, name)),
                             }
                         } else if let Some(a) = &k.action {
@@ -201,7 +218,14 @@ impl Layout {
                         } else {
                             KeyKind::Gap
                         };
-                        keys.push(Key { kind, w, label: k.label.clone(), shift_label: k.shift_label.clone() });
+                        let long = match &k.long {
+                            None => None,
+                            Some(s) => match parse_key(s).or_else(|| parse_action(s).map(KeyKind::Action)) {
+                                Some(x) => Some(x),
+                                None => return err(format!("{}: unknown long-press alternate {:?}", at, s)),
+                            },
+                        };
+                        keys.push(Key { kind, w, label: k.label.clone(), shift_label: k.shift_label.clone(), long });
                     }
                     if keys.is_empty() {
                         return err(format!("part {} page {} row {}: no keys", pi + 1, gi + 1, ri + 1));
@@ -284,6 +308,7 @@ impl Layout {
                         label: k.label.clone(),
                         shift_label: k.shift_label.clone(),
                         region: part.region.clone(),
+                        long: k.long.clone(),
                     });
                 }
                 x += w;
@@ -303,6 +328,7 @@ fn parse_action(a: &str) -> Option<Action> {
     match a {
         "layout:next" => Some(Action::LayoutNext),
         "keyboard:hide" => Some(Action::KeyboardHide),
+        "fn" => Some(Action::Fn),
         _ => None,
     }
 }
@@ -312,6 +338,9 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("full", include_str!("../../../data/layouts/full.toml")),
     ("tablet", include_str!("../../../data/layouts/tablet.toml")),
     ("split", include_str!("../../../data/layouts/split.toml")),
+    ("numpad", include_str!("../../../data/layouts/numpad.toml")),
+    ("textedit", include_str!("../../../data/layouts/textedit.toml")),
+    ("remote", include_str!("../../../data/layouts/remote.toml")),
 ];
 
 /// Load all layouts: built-ins, then every *.toml of `dirs` in order (a later file with the same name replaces an
@@ -363,7 +392,7 @@ mod tests {
         let (all, errs) = load_all(&[]);
         assert!(errs.is_empty(), "{:?}", errs);
         let names: Vec<&str> = all.iter().map(|l| l.name.as_str()).collect();
-        assert_eq!(names, vec!["none", "full", "tablet", "split"]);
+        assert_eq!(names, vec!["none", "full", "tablet", "split", "numpad", "textedit", "remote"]);
         let full = &all[1];
         // full PC keyboard: function row, Esc, Tab, Ctrl/Alt/Meta, arrows, Home/End/PgUp/PgDn, Ins/Del, numpad (optional)
         let codes: HashSet<u16> = full
@@ -384,6 +413,30 @@ mod tests {
         assert!(tablet.parts[0].pages.len() >= 2, "tablet layout needs a symbols page");
         let split = &all[3];
         assert_eq!(split.regions(&opts(&[])), vec!["keyboard_left", "keyboard_right"]);
+    }
+
+    #[test]
+    fn combos_long_press_and_fn() {
+        let t = r#"name = "c"
+[[part]]
+region = "keyboard"
+[[part.page]]
+[[part.page.row]]
+keys = [ { key = "LEFTSHIFT+2", label = "@" }, { key = "Q", long = "1" }, { key = "W", long = "LEFTSHIFT+1" }, { action = "fn" } ]
+"#;
+        let l = Layout::parse(t, "t").unwrap();
+        let k = &l.parts[0].pages[0].rows[0].keys;
+        assert_eq!(k[0].kind, KeyKind::Combo(vec![42, 3]));
+        assert_eq!(k[1].long, Some(KeyKind::Code(2)));
+        assert_eq!(k[2].long, Some(KeyKind::Combo(vec![42, 2])));
+        assert_eq!(k[3].kind, KeyKind::Action(Action::Fn));
+        let placed = Layout::place(&l.parts[0], "main", &Rect::new(0.0, 0.0, 400.0, 100.0), &HashSet::new(), 0.0);
+        assert_eq!(placed[1].long, Some(KeyKind::Code(2)));
+        assert!(Layout::parse(&t.replace("long = \"1\"", "long = \"NOPE\""), "t").unwrap_err().contains("alternate"));
+        // the shipped layouts use them
+        let (all, _) = load_all(&[]);
+        let has_fn = |n: &str| all.iter().find(|l| l.name == n).unwrap().parts.iter().flat_map(|p| p.pages.iter().flat_map(|g| g.rows.iter().flat_map(|r| r.keys.iter()))).any(|k| k.kind == KeyKind::Action(Action::Fn));
+        assert!(has_fn("full") && has_fn("tablet"));
     }
 
     #[test]

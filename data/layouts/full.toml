@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
 # DexHid layout: full PC keyboard (ANSI, 16 units wide), function row optional ("function", on by default),
 # numeric keypad optional ("numpad", off by default; it gets its own movable region).
+# Fn (M2): hold Fn, or tap it to lock the layer: 1-0 - = are F1-F12, F1/F2/F3 mute / volume, F5-F7 media,
+# F11/F12 brightness, arrows Home / End / PgUp / PgDn, Backspace = Delete.
 # Keys send evdev codes: the desktop's xkb layout decides what they type; symbol legends follow it.
 name = "full"
 title = "Full PC keyboard"
@@ -57,8 +59,8 @@ keys = [
 [[part.page.row]]
 keys = [
   { key = "LEFTCTRL", w = 1.25 }, { key = "LEFTMETA", w = 1.25 }, { key = "LEFTALT", w = 1.25 },
-  { key = "SPACE", w = 6.75 },
-  { key = "RIGHTALT", w = 1.25 }, { key = "RIGHTCTRL", w = 1.25 },
+  { key = "SPACE", w = 5.5 },
+  { key = "RIGHTALT", w = 1.25 }, { action = "fn", w = 1.25, label = "Fn" }, { key = "RIGHTCTRL", w = 1.25 },
   { key = "LEFT" }, { key = "DOWN" }, { key = "RIGHT" },
 ]
 

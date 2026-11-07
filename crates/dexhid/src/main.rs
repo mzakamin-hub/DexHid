@@ -7,13 +7,17 @@
 //!   dexhid toggle | release | resume | status | layout <name>       (D-Bus client of org.dexhid.DexHid1)
 //!   dexhid debug-connect | debug-disconnect                         (needs a daemon started with --debug)
 //!   dexhid debug list | grabtest | replay | volsim                  (test tools, see debug.rs)
-//!   dexhid --restore                                                (ExecStopPost; M2 restores the brightness)
+//!   dexhid set KEY [VALUE] | settings | quick ID                    (M2: settings registry, quick actions)
+//!   dexhid guardian --fd N [--hb-ms MS]                             (the key guardian; started by the daemon)
+//!   dexhid --restore                                                (ExecStopPost: restores a dimmed panel)
 //!   dexhid version
 
 mod daemon;
 mod dbus;
 mod debug;
+mod desktop;
 mod devices;
+mod guardian;
 mod logind;
 mod notify;
 mod render;
@@ -28,6 +32,7 @@ fn usage() -> i32 {
     eprintln!(
         "usage: dexhid daemon [--config FILE] [--touch-dev /dev/input/eventN] [--debug [--chord-test-dev P] [--simulate-connect]]\n       \
          dexhid toggle | release | resume | status | layout <name> | debug-connect | debug-disconnect\n       \
+         dexhid set KEY [VALUE] | settings | quick ID\n       \
          dexhid debug list | grabtest --dev P | replay --fifo F ... | volsim --fifo F ...\n       \
          dexhid --restore | version"
     );
@@ -66,15 +71,26 @@ fn main() {
             Some(n) => client("SetLayout", Some(n)),
             None => usage(),
         },
+        Some("set") => match (argv.get(1), argv.get(2)) {
+            (Some(k), v) => client("SetSetting", Some(&format!("{}\u{1f}{}", k, v.map(|s| s.as_str()).unwrap_or("")))),
+            _ => usage(),
+        },
+        Some("settings") => client("GetSettings", None),
+        Some("quick") => match argv.get(1) {
+            Some(id) => client("RunQuick", Some(id)),
+            None => usage(),
+        },
+        Some("guardian") => guardian::run(a.val("--fd").and_then(|v| v.parse().ok()).unwrap_or(3), a.val("--hb-ms").and_then(|v| v.parse().ok()).unwrap_or(3000)),
         Some("debug-connect") => client("DebugConnector", Some("connect")),
         Some("debug-disconnect") => client("DebugConnector", Some("disconnect")),
         Some("debug") => debug::run(&debug::Args(argv[1..].to_vec())),
         Some("--restore") => {
-            // M1 changes no brightness; M2's dimming restores it here from $XDG_RUNTIME_DIR/dexhid/state
+            // ExecStopPost: put back a brightness the daemon dimmed (the state is in $XDG_RUNTIME_DIR/dexhid)
+            println!("{}", desktop::restore());
             0
         }
         Some("version") | Some("--version") => {
-            println!("dexhid {} (M1, GPL-3.0-or-later PROVISIONAL)", env!("CARGO_PKG_VERSION"));
+            println!("dexhid {} (M2, GPL-3.0-or-later PROVISIONAL)", env!("CARGO_PKG_VERSION"));
             0
         }
         _ => usage(),

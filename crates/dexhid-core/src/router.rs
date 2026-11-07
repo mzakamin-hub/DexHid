@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
 //! Pad-mode touch routing. Every contact belongs to the area where it STARTED until it lifts: the control strip,
-//! a settings-panel button, the touchpad, a keyboard key, or (edit mode) a region handle. The router also owns the
-//! on-screen model the UI draws (strip buttons, regions, keys, pressed state, touch dots) and the 5-finger release.
-//! Pure logic: no devices, no clock (times are passed in, ms).
+//! a settings-sheet button, the touchpad, a keyboard key, a quick action, or (edit mode) a region handle. The router
+//! also owns the on-screen model the UI draws (strip buttons, regions, keys, pressed state, touch dots, the settings
+//! sheet, quick actions, snap guides) and the 5-finger release. Pure logic: no devices, no clock (times are ms).
+//!
+//! M2: edge handles + snap guides in edit mode, the virtual touchpad is recreated only when edit mode ends (M1
+//! recreated it on every drag step, which made the daemon lag behind the finger), the settings sheet (built from the
+//! settings registry), quick actions, palm / rest-zone / disable-while-typing / pen-proximity filters, sticky
+//! modifiers, the Fn layer, combo keys and long-press alternates (keys.rs), Caps / Num lock LEDs, theme + status text.
 
-use crate::arrangement::{self, Arrangement, EditCtx, Handle, Orientation, TOUCHPAD};
+use crate::arrangement::{self, Arrangement, EditCtx, Guide, Handle, Orientation, QUICK, TOUCHPAD};
 use crate::geom::{Geometry, Rect};
 use crate::keycodes;
 use crate::keys::{ContactId, KeyMachine, KeyOut};
 use crate::layout::{Action, KeyKind, Layout, PlacedKey};
 use crate::mt::Contact;
+use crate::settings::{Kind, Row};
 use crate::touchpad::{PadFrame, PadMapper};
 use std::collections::{HashMap, HashSet};
 
@@ -31,6 +37,17 @@ pub struct RouterCfg {
     pub pad_units_per_mm: f32,
     pub palm_major: i32,
     pub options: HashSet<String>,
+    // M2
+    pub sticky: bool,
+    pub long_ms: i64,
+    pub palm_keyboard: bool,
+    pub rest_zone_mm: f32,
+    /// fractions of the work area
+    pub rest_zones: Vec<Rect>,
+    pub dwt_ms: i64,
+    pub pen_pause: bool,
+    /// show the quick-actions region
+    pub quick: bool,
 }
 
 impl Default for RouterCfg {
@@ -50,6 +67,14 @@ impl Default for RouterCfg {
             pad_units_per_mm: 124.0,
             palm_major: 0,
             options: ["function".to_string()].into_iter().collect(),
+            sticky: false,
+            long_ms: 450,
+            palm_keyboard: true,
+            rest_zone_mm: 0.0,
+            rest_zones: vec![],
+            dwt_ms: 0,
+            pen_pause: true,
+            quick: false,
         }
     }
 }
@@ -63,28 +88,15 @@ pub enum Btn {
     Done,
     Reset,
     Cancel,
-    PanelLayout,
-    PanelAutostart,
-    PanelEdit,
     PanelClose,
-}
-
-impl Btn {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Btn::Display => "strip.display",
-            Btn::Layout => "strip.layout",
-            Btn::Settings => "strip.settings",
-            Btn::Exit => "strip.exit",
-            Btn::Done => "strip.done",
-            Btn::Reset => "strip.reset",
-            Btn::Cancel => "strip.cancel",
-            Btn::PanelLayout => "panel.layout",
-            Btn::PanelAutostart => "panel.autostart",
-            Btn::PanelEdit => "panel.edit",
-            Btn::PanelClose => "panel.close",
-        }
-    }
+    /// settings sheet: module tab i, row i (tap = step +1), its minus / plus / move-up buttons, pages
+    SheetTab(u8),
+    SheetRow(u8),
+    SheetMinus(u8),
+    SheetPlus(u8),
+    SheetUp(u8),
+    SheetPrev,
+    SheetNext,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -92,12 +104,48 @@ pub struct ButtonView {
     pub btn: Btn,
     pub rect: Rect,
     pub label: String,
+    /// GEOM name (strip.display, sheet.row.<key>, ...)
+    pub name: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegionView {
     pub id: String,
     pub rect: Rect,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct QuickView {
+    pub id: String,
+    pub label: String,
+    pub rect: Rect,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SheetRowView {
+    pub rect: Rect,
+    pub title: String,
+    pub live: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct SheetView {
+    pub rect: Rect,
+    pub title: String,
+    pub subtitle: String,
+    pub rows: Vec<SheetRowView>,
+    /// selected tab index
+    pub tab: usize,
+}
+
+/// one module of the settings sheet (built by the daemon from settings::rows + the quick-action rows)
+#[derive(Clone, Debug, PartialEq)]
+pub struct SheetModule {
+    pub id: String,
+    pub title: String,
+    pub live: bool,
+    pub plan: String,
+    pub rows: Vec<Row>,
 }
 
 /// what the UI draws. `version` changes when the static part changes (layout, arrangement, labels, edit mode).
@@ -116,11 +164,24 @@ pub struct UiModel {
     pub keys: Vec<PlacedKey>,
     pub shift: bool,
     pub edit: bool,
-    pub panel: Option<Rect>,
-    pub panel_title: String,
+    pub sheet: Option<SheetView>,
+    pub quick: Vec<QuickView>,
+    pub guides: Vec<Guide>,
+    /// battery / display text in the strip
+    pub info: String,
+    /// theme name, accent "#rrggbb", key opacity %
+    pub theme: (String, String, u32),
+    /// Caps Lock, Num Lock LEDs (from the desktop, through the virtual keyboard)
+    pub leds: (bool, bool),
+    /// latched sticky modifiers (code, locked)
+    pub latched: Vec<(u16, bool)>,
+    pub fn_on: bool,
+    /// a short notice in the strip (pen pause, pad only, ...)
+    pub notice: String,
     // dynamic part
     pub lit_keys: Vec<usize>,
     pub lit_button: Option<Btn>,
+    pub lit_quick: Option<usize>,
     pub dots: Vec<(f32, f32)>,
 }
 
@@ -133,7 +194,6 @@ pub enum Out {
     FiveFinger,
     LayoutNext,
     SetLayout(String),
-    AutostartNext,
     /// edit mode left with "Done": persist `arrangement()`
     SaveArrangement,
     /// the arrangement was reset to the defaults (also persisted by removing the file)
@@ -144,6 +204,12 @@ pub enum Out {
     NeedArrangement(Orientation),
     EditMode(bool),
     PanelOpen(bool),
+    /// a quick action button was tapped
+    Quick(String),
+    /// settings sheet: change a setting by one step (+1 / -1); `quick:<id>` / `quick.up:<id>` for quick rows
+    SettingStep(String, i32),
+    /// a key press reached the virtual keyboard (feedback: sound / haptics)
+    KeyFeedback,
     /// static model changed (full redraw), dynamic changed (pressed keys / dots)
     Static,
     Dynamic,
@@ -156,6 +222,7 @@ enum Owner {
     Button(Btn),
     Pad,
     Key,
+    Quick(usize),
     Edit { handle: Handle, region: String, orig: Rect, x0: f32, y0: f32 },
     Ignored,
 }
@@ -177,8 +244,10 @@ pub struct Router {
     arr: Option<Arrangement>,
     arr_backup: Option<Arrangement>,
     edit: bool,
-    panel_open: bool,
-    autostart_label: String,
+    sheet_open: bool,
+    sheet_tab: usize,
+    sheet_page: usize,
+    sheet: Vec<SheetModule>,
     keys: KeyMachine,
     pad: Option<PadMapper>,
     contacts: HashMap<ContactId, Track>,
@@ -186,12 +255,24 @@ pub struct Router {
     five_blocked: bool,
     model: UiModel,
     orient: Option<Orientation>,
+    quick_items: Vec<(String, String, u32)>,
+    guides: Vec<Guide>,
+    info: String,
+    theme: (String, String, u32),
+    leds: (bool, bool),
+    pen: bool,
+    notice: String,
+    last_key_t: i64,
+    /// sheet rows on screen: (row index in the module, key)
+    sheet_keys: Vec<String>,
 }
 
 impl Router {
     pub fn new(cfg: RouterCfg, layout: Layout) -> Router {
         let page = layout.first_page();
-        let hold = cfg.hold_ms;
+        let mut keys = KeyMachine::new(cfg.hold_ms);
+        keys.long_ms = cfg.long_ms;
+        keys.sticky = cfg.sticky;
         Router {
             cfg,
             geo: None,
@@ -200,15 +281,26 @@ impl Router {
             arr: None,
             arr_backup: None,
             edit: false,
-            panel_open: false,
-            autostart_label: "ask".into(),
-            keys: KeyMachine::new(hold),
+            sheet_open: false,
+            sheet_tab: 0,
+            sheet_page: 0,
+            sheet: vec![],
+            keys,
             pad: None,
             contacts: HashMap::new(),
             five: None,
             five_blocked: false,
             model: UiModel::default(),
             orient: None,
+            quick_items: vec![],
+            guides: vec![],
+            info: String::new(),
+            theme: ("dark".into(), "#4a8be0".into(), 100),
+            leds: (false, false),
+            pen: false,
+            notice: String::new(),
+            last_key_t: i64::MIN / 2,
+            sheet_keys: vec![],
         }
     }
 
@@ -226,6 +318,9 @@ impl Router {
     }
     pub fn editing(&self) -> bool {
         self.edit
+    }
+    pub fn sheet_open(&self) -> bool {
+        self.sheet_open
     }
     pub fn arrangement(&self) -> Arrangement {
         self.arr.clone().unwrap_or_default()
@@ -251,13 +346,85 @@ impl Router {
         Some((x, y, self.cfg.pad_units_per_mm.round().max(1.0) as i32))
     }
 
-    pub fn set_autostart_label(&mut self, s: &str) -> Vec<Out> {
-        self.autostart_label = s.to_string();
-        if self.panel_open {
+    /// apply a changed configuration (settings sheet); returns the outs of the relayout
+    pub fn set_cfg(&mut self, cfg: RouterCfg) -> Vec<Out> {
+        let mut out = vec![];
+        if cfg.sticky != self.cfg.sticky || cfg.options != self.cfg.options {
+            out.extend(self.release_all());
+        }
+        self.keys.hold_ms = cfg.hold_ms;
+        self.keys.long_ms = cfg.long_ms;
+        self.keys.sticky = cfg.sticky;
+        self.cfg = cfg;
+        out.extend(self.relayout());
+        out
+    }
+
+    pub fn set_autostart_label(&mut self, _s: &str) -> Vec<Out> {
+        vec![]
+    }
+
+    /// the settings sheet content (call again after every change)
+    pub fn set_sheet(&mut self, modules: Vec<SheetModule>) -> Vec<Out> {
+        if self.sheet == modules {
+            return vec![];
+        }
+        self.sheet = modules;
+        if self.sheet_open {
             self.relayout()
         } else {
             vec![]
         }
+    }
+
+    pub fn set_quick(&mut self, items: Vec<(String, String, u32)>) -> Vec<Out> {
+        if self.quick_items == items {
+            return vec![];
+        }
+        self.quick_items = items;
+        self.relayout()
+    }
+
+    pub fn set_info(&mut self, s: &str) -> Vec<Out> {
+        if self.info == s {
+            return vec![];
+        }
+        self.info = s.to_string();
+        self.relayout()
+    }
+
+    pub fn set_notice(&mut self, s: &str) -> Vec<Out> {
+        if self.notice == s {
+            return vec![];
+        }
+        self.notice = s.to_string();
+        self.relayout()
+    }
+
+    pub fn set_theme(&mut self, name: &str, accent: &str, key_alpha: u32) -> Vec<Out> {
+        let t = (name.to_string(), accent.to_string(), key_alpha);
+        if self.theme == t {
+            return vec![];
+        }
+        self.theme = t;
+        self.relayout()
+    }
+
+    pub fn set_leds(&mut self, caps: bool, num: bool) -> Vec<Out> {
+        if self.leds == (caps, num) {
+            return vec![];
+        }
+        self.leds = (caps, num);
+        self.relayout()
+    }
+
+    /// pen in proximity (passive read of the pen device): new touches are ignored while `pen_pause` is on
+    pub fn set_pen(&mut self, near: bool) -> Vec<Out> {
+        if self.pen == near {
+            return vec![];
+        }
+        self.pen = near;
+        vec![Out::Note(format!("pen {}", if near { "near: touches paused" } else { "away" }))]
     }
 
     pub fn set_geometry(&mut self, g: Geometry) -> Vec<Out> {
@@ -293,8 +460,13 @@ impl Router {
         self.relayout()
     }
 
+    /// the regions besides the touchpad: keyboard parts + the quick bar
     fn kb_regions(&self) -> Vec<String> {
-        self.layout.regions(&self.cfg.options)
+        let mut v = self.layout.regions(&self.cfg.options);
+        if self.cfg.quick && !self.quick_items.is_empty() {
+            v.push(QUICK.to_string());
+        }
+        v
     }
 
     fn work_area(&self) -> (Rect, Rect) {
@@ -307,6 +479,7 @@ impl Router {
         let ppm = self.ppm();
         let mut m = HashMap::new();
         m.insert(TOUCHPAD.to_string(), (40.0 * ppm, 30.0 * ppm));
+        m.insert(QUICK.to_string(), (12.0 * ppm, 10.0 * ppm));
         for p in self.layout.visible_parts(&self.cfg.options) {
             let (mut uw, mut uh) = (0.0f32, 0.0f32);
             for g in &p.pages {
@@ -317,6 +490,120 @@ impl Router {
             m.insert(p.region.clone(), (uw * 7.0 * ppm, uh * 6.0 * ppm));
         }
         m
+    }
+
+    fn place_quick(&self, r: &Rect, ppm: f32) -> Vec<QuickView> {
+        let items = &self.quick_items;
+        if items.is_empty() {
+            return vec![];
+        }
+        let horiz = r.w >= r.h;
+        let (axis, cross) = if horiz { (r.w, r.h) } else { (r.h, r.w) };
+        let total: u32 = items.iter().map(|i| i.2.max(1)).sum();
+        let min_len = 14.0 * ppm;
+        let lines = ((total as f32 * min_len / axis).ceil() as usize).clamp(1, items.len()).min(((cross / (8.0 * ppm)).floor() as usize).max(1));
+        let per_line = (total as f32 / lines as f32).ceil() as u32;
+        let gap = 1.2 * ppm;
+        let line_w = cross / lines as f32;
+        let mut out = vec![];
+        let mut chunks: Vec<Vec<&(String, String, u32)>> = vec![vec![]];
+        let mut acc = 0;
+        for it in items {
+            if acc + it.2.max(1) > per_line && !chunks.last().unwrap().is_empty() && chunks.len() < lines {
+                chunks.push(vec![]);
+                acc = 0;
+            }
+            acc += it.2.max(1);
+            chunks.last_mut().unwrap().push(it);
+        }
+        for (li, ch) in chunks.iter().enumerate() {
+            let w: u32 = ch.iter().map(|i| i.2.max(1)).sum();
+            let unit = axis / w.max(1) as f32;
+            let mut pos = 0.0;
+            for it in ch {
+                let len = unit * it.2.max(1) as f32;
+                let rect = if horiz {
+                    Rect::new(r.x + pos + gap / 2.0, r.y + li as f32 * line_w + gap / 2.0, len - gap, line_w - gap)
+                } else {
+                    Rect::new(r.x + li as f32 * line_w + gap / 2.0, r.y + pos + gap / 2.0, line_w - gap, len - gap)
+                };
+                out.push(QuickView { id: it.0.clone(), label: it.1.clone(), rect });
+                pos += len;
+            }
+        }
+        out
+    }
+
+    fn btn(b: Btn, rect: Rect, label: &str, name: String) -> ButtonView {
+        ButtonView { btn: b, rect, label: label.to_string(), name }
+    }
+
+    /// the settings sheet: tabs on the left, the rows of the selected module on the right, paged
+    fn place_sheet(&mut self, area: &Rect, ppm: f32, buttons: &mut Vec<ButtonView>) -> SheetView {
+        let pw = (240.0 * ppm).min(area.w - 4.0 * ppm);
+        let ph = (area.h - 4.0 * ppm).max(40.0 * ppm);
+        let p = Rect::new(area.x + (area.w - pw) / 2.0, area.y + 2.0 * ppm, pw, ph);
+        let m = 2.0 * ppm;
+        let tab_w = (52.0 * ppm).min(pw * 0.32);
+        let n = self.sheet.len().max(1);
+        let tab_h = ((ph - 2.0 * m) / n as f32).min(10.0 * ppm);
+        self.sheet_tab = self.sheet_tab.min(n - 1);
+        for (i, md) in self.sheet.iter().enumerate() {
+            let r = Rect::new(p.x + m, p.y + m + i as f32 * tab_h, tab_w, tab_h - 0.6 * ppm);
+            let label = if md.live { md.title.clone() } else { format!("{} \u{b7}", md.title) };
+            buttons.push(Self::btn(Btn::SheetTab(i as u8), r, &label, format!("sheet.tab.{}", md.id)));
+        }
+        let rx = p.x + tab_w + 2.0 * m;
+        let rw = p.right() - m - rx;
+        let head = 12.0 * ppm;
+        let foot = 11.0 * ppm;
+        let row_h = 10.5 * ppm;
+        let per_page = (((ph - head - foot - 2.0 * m) / row_h).floor() as usize).max(1);
+        let mut view = SheetView { rect: p, tab: self.sheet_tab, ..Default::default() };
+        self.sheet_keys.clear();
+        if let Some(md) = self.sheet.get(self.sheet_tab).cloned() {
+            view.title = md.title.clone();
+            view.subtitle = if md.live { String::new() } else { format!("planned ({}): settings are stored now", md.plan) };
+            let pages = md.rows.len().div_ceil(per_page).max(1);
+            self.sheet_page = self.sheet_page.min(pages - 1);
+            let first = self.sheet_page * per_page;
+            for (j, row) in md.rows.iter().enumerate().skip(first).take(per_page) {
+                let i = j - first;
+                let y = p.y + m + head + i as f32 * row_h;
+                let rr = Rect::new(rx, y, rw, row_h - 1.0 * ppm);
+                view.rows.push(SheetRowView { rect: rr, title: row.title.clone(), live: row.live });
+                let vw = 30.0 * ppm;
+                let bh = rr.h - 1.6 * ppm;
+                let by = rr.y + 0.8 * ppm;
+                let k = row.key.clone();
+                let idx = i as u8;
+                match row.kind {
+                    Kind::Num { .. } => {
+                        let bw = 10.0 * ppm;
+                        buttons.push(Self::btn(Btn::SheetPlus(idx), Rect::new(rr.right() - bw, by, bw, bh), "+", format!("sheet.plus.{}", k)));
+                        buttons.push(Self::btn(Btn::SheetRow(idx), Rect::new(rr.right() - bw - vw - ppm, by, vw, bh), &row.value, format!("sheet.row.{}", k)));
+                        buttons.push(Self::btn(Btn::SheetMinus(idx), Rect::new(rr.right() - 2.0 * bw - vw - 2.0 * ppm, by, bw, bh), "\u{2212}", format!("sheet.minus.{}", k)));
+                    }
+                    _ => {
+                        buttons.push(Self::btn(Btn::SheetRow(idx), Rect::new(rr.right() - vw, by, vw, bh), &row.value, format!("sheet.row.{}", k)));
+                        if k.starts_with("quick:") && row.value != "off" {
+                            let bw = 10.0 * ppm;
+                            buttons.push(Self::btn(Btn::SheetUp(idx), Rect::new(rr.right() - vw - bw - ppm, by, bw, bh), "\u{2191}", format!("sheet.up.{}", k)));
+                        }
+                    }
+                }
+                self.sheet_keys.push(k);
+            }
+            let fy = p.bottom() - m - foot + 1.0 * ppm;
+            if pages > 1 {
+                let bw = 24.0 * ppm;
+                buttons.push(Self::btn(Btn::SheetPrev, Rect::new(rx, fy, bw, foot - 2.0 * ppm), "\u{2039} Back", "sheet.prev".into()));
+                buttons.push(Self::btn(Btn::SheetNext, Rect::new(rx + bw + m, fy, bw, foot - 2.0 * ppm), &format!("More {}/{} \u{203a}", self.sheet_page + 1, pages), "sheet.next".into()));
+            }
+            let cw = 26.0 * ppm;
+            buttons.push(Self::btn(Btn::PanelClose, Rect::new(p.right() - m - cw, fy, cw, foot - 2.0 * ppm), "Close", "panel.close".into()));
+        }
+        view
     }
 
     /// recompute every rect from layout + arrangement + geometry
@@ -348,7 +635,8 @@ impl Router {
                 keys.extend(Layout::place(p, &self.page, &r.rect, &self.cfg.options, self.cfg.key_gap_mm * ppm));
             }
         }
-        // touchpad
+        let quick = regions.iter().find(|r| r.id == QUICK).map(|r| self.place_quick(&r.rect, ppm)).unwrap_or_default();
+        // touchpad: while editing, the virtual device keeps its old size (recreated once when edit mode ends)
         let pad_rect = regions.iter().find(|r| r.id == TOUCHPAD).map(|r| r.rect).unwrap_or(area);
         let zone = if self.cfg.click_zone_mm > 0.0 { self.cfg.click_zone_mm * ppm } else { 0.0 };
         let upp = self.cfg.pad_units_per_mm / ppm;
@@ -356,56 +644,45 @@ impl Router {
             Some(p) => p.rect != pad_rect || (p.units_per_px - upp).abs() > 1e-4 || (p.zone_h - zone.min(pad_rect.h / 3.0)).abs() > 1e-3,
             None => true,
         };
-        if changed {
+        if changed && !(self.edit && self.pad.is_some()) {
+            let old_dims = self.pad.as_ref().map(|p| p.dims());
             if let Some(p) = self.pad.as_mut() {
                 if let Some(f) = p.release_all() {
                     out.push(Out::Pad(f));
                 }
             }
-            self.pad = Some(PadMapper::new(pad_rect, upp, zone));
-            out.push(Out::PadChanged);
+            let np = PadMapper::new(pad_rect, upp, zone);
+            // only a new size / resolution needs a new virtual device; a moved pad keeps it
+            if old_dims != Some(np.dims()) || self.pad.as_ref().is_some_and(|p| (p.units_per_px - upp).abs() > 1e-4) {
+                out.push(Out::PadChanged);
+            }
+            self.pad = Some(np);
         }
         // buttons
         let m = (strip.h * 0.14).round();
         let bh = strip.h - 2.0 * m;
         let mut buttons = vec![];
-        let specs: Vec<(Btn, f32, String)> = if self.edit {
-            vec![(Btn::Cancel, 24.0, "Cancel".into()), (Btn::Reset, 24.0, "Reset".into()), (Btn::Done, 24.0, "Done".into())]
+        let specs: Vec<(Btn, f32, String, &str)> = if self.edit {
+            vec![(Btn::Cancel, 24.0, "Cancel".into(), "strip.cancel"), (Btn::Reset, 24.0, "Reset".into(), "strip.reset"), (Btn::Done, 24.0, "Done".into(), "strip.done")]
         } else {
             vec![
-                (Btn::Exit, 18.0, "Exit".into()),
-                (Btn::Settings, 26.0, "Settings".into()),
-                (Btn::Layout, 40.0, format!("Keyboard: {}", self.layout.title)),
-                (Btn::Display, 36.0, "Use as display".into()),
+                (Btn::Exit, 18.0, "Exit".into(), "strip.exit"),
+                (Btn::Settings, 26.0, "Settings".into(), "strip.settings"),
+                (Btn::Layout, 40.0, format!("Keyboard: {}", self.layout.title), "strip.layout"),
+                (Btn::Display, 36.0, "Use as display".into(), "strip.display"),
             ]
         };
         let mut x = strip.right() - m;
-        for (b, wmm, label) in specs {
+        for (b, wmm, label, name) in specs {
             let w = (wmm * ppm).min(strip.w / 5.0);
             x -= w;
-            buttons.push(ButtonView { btn: b, rect: Rect::new(x, strip.y + m, w, bh), label });
+            buttons.push(Self::btn(b, Rect::new(x, strip.y + m, w, bh), &label, name.into()));
             x -= m;
         }
-        let mut panel = None;
-        if self.panel_open && !self.edit {
-            let pw = (130.0 * ppm).min(area.w * 0.9);
-            let rowh = 14.0 * ppm;
-            let ph = rowh * 5.6;
-            let p = Rect::new(area.x + (area.w - pw) / 2.0, area.y + (area.h - ph).max(0.0) / 2.0, pw, ph.min(area.h));
-            let items = [
-                (Btn::PanelLayout, format!("Keyboard: {}", self.layout.title)),
-                (Btn::PanelAutostart, format!("When a monitor is plugged in: {}", self.autostart_label)),
-                (Btn::PanelEdit, "Move / resize areas".to_string()),
-                (Btn::PanelClose, "Close".to_string()),
-            ];
-            for (i, (b, l)) in items.into_iter().enumerate() {
-                let r = Rect::new(p.x + m * 2.0, p.y + rowh * (1.2 + i as f32 * 1.05), p.w - m * 4.0, rowh * 0.9);
-                buttons.push(ButtonView { btn: b, rect: r, label: l });
-            }
-            panel = Some(p);
-        }
-        let zones = self.pad.as_ref().and_then(|p| p.zones());
+        let sheet = if self.sheet_open && !self.edit { Some(self.place_sheet(&area, ppm, &mut buttons)) } else { None };
+        let zones = if self.edit { PadMapper::new(pad_rect, upp, zone).zones() } else { self.pad.as_ref().and_then(|p| p.zones()) };
         let version = self.model.version + 1;
+        let notice = if self.pen && self.cfg.pen_pause { "pen near: touches paused".to_string() } else { self.notice.clone() };
         self.model = UiModel {
             version,
             w: g.w,
@@ -413,17 +690,25 @@ impl Router {
             px_per_mm: ppm,
             strip,
             title: "DexHid".into(),
-            hint: if self.edit { "drag an area to move it, a corner to resize it".into() } else { "hold the bar to move / resize the areas".into() },
+            hint: if self.edit { "drag an area to move it, an edge or corner to resize it".into() } else { "hold the bar to move / resize the areas".into() },
             buttons,
             regions,
             zones,
             keys,
             shift: self.keys.shift_held(),
             edit: self.edit,
-            panel,
-            panel_title: "Settings (more in M2)".into(),
+            sheet,
+            quick,
+            guides: self.guides.clone(),
+            info: self.info.clone(),
+            theme: self.theme.clone(),
+            leds: self.leds,
+            latched: self.keys.latched(),
+            fn_on: self.keys.fn_active(),
+            notice,
             lit_keys: self.keys.lit_keys(),
             lit_button: None,
+            lit_quick: None,
             dots: self.contacts.values().map(|t| (t.x, t.y)).collect(),
         };
         out.push(Out::Static);
@@ -441,14 +726,19 @@ impl Router {
             Owner::Button(b) => Some(b),
             _ => None,
         });
-        if lit != self.model.lit_keys || dots != self.model.dots || btn != self.model.lit_button {
+        let lq = self.contacts.values().find_map(|t| if let Owner::Quick(i) = t.owner { Some(i) } else { None });
+        if lit != self.model.lit_keys || dots != self.model.dots || btn != self.model.lit_button || lq != self.model.lit_quick {
             self.model.lit_keys = lit;
             self.model.dots = dots;
             self.model.lit_button = btn;
+            self.model.lit_quick = lq;
             out.push(Out::Dynamic);
         }
-        if self.keys.shift_held() != self.model.shift {
+        let latched = self.keys.latched();
+        if self.keys.shift_held() != self.model.shift || latched != self.model.latched || self.keys.fn_active() != self.model.fn_on {
             self.model.shift = self.keys.shift_held();
+            self.model.latched = latched;
+            self.model.fn_on = self.keys.fn_active();
             self.model.version += 1;
             out.push(Out::Static);
         }
@@ -462,16 +752,23 @@ impl Router {
         self.model.keys.iter().position(|k| k.rect.contains(x, y))
     }
 
-    fn key_outs(&mut self, v: Vec<KeyOut>, out: &mut Vec<Out>) {
+    fn key_outs(&mut self, v: Vec<KeyOut>, t: i64, out: &mut Vec<Out>) {
         for k in v {
             match k {
-                KeyOut::Key(c, p) => out.push(Out::Key(c, p)),
+                KeyOut::Key(c, p) => {
+                    if p {
+                        self.last_key_t = t;
+                        out.push(Out::KeyFeedback);
+                    }
+                    out.push(Out::Key(c, p))
+                }
                 KeyOut::Action(Action::Page(id)) => {
                     self.page = id;
                     out.extend(self.relayout());
                 }
                 KeyOut::Action(Action::LayoutNext) => out.push(Out::LayoutNext),
                 KeyOut::Action(Action::KeyboardHide) => out.push(Out::SetLayout("none".into())),
+                KeyOut::Action(Action::Fn) => {}
             }
         }
     }
@@ -516,7 +813,7 @@ impl Router {
                     Owner::Key => {
                         let k = self.hit_key(lx, ly);
                         let v = self.keys.motion(id, k);
-                        self.key_outs(v, &mut out);
+                        self.key_outs(v, t, &mut out);
                     }
                     Owner::Edit { handle, ref region, orig, x0, y0 } => {
                         let (_, area) = self.work_area();
@@ -525,7 +822,9 @@ impl Router {
                         let ctx = EditCtx { area, snap: self.cfg.snap_mm * ppm, min, others: &others };
                         let nr = arrangement::drag(&orig, handle, lx - x0, ly - y0, &ctx);
                         let cur = self.model.regions.iter().find(|r| &r.id == region).map(|r| r.rect);
-                        if cur != Some(nr) {
+                        let gs = arrangement::guides(&nr, &ctx);
+                        if cur != Some(nr) || gs != self.guides {
+                            self.guides = gs;
                             if let Some(a) = self.arr.as_mut() {
                                 a.set(region, nr.to_frac(&area));
                             }
@@ -562,7 +861,20 @@ impl Router {
                     }
                     Owner::Key => {
                         let v = self.keys.up(id);
-                        self.key_outs(v, &mut out);
+                        self.key_outs(v, t, &mut out);
+                    }
+                    Owner::Quick(i) => {
+                        if let Some(q) = self.model.quick.get(i) {
+                            if q.rect.contains(tr.x, tr.y) {
+                                out.push(Out::Quick(q.id.clone()));
+                            }
+                        }
+                    }
+                    Owner::Edit { .. } => {
+                        if !self.guides.is_empty() {
+                            self.guides.clear();
+                            out.extend(self.relayout());
+                        }
                     }
                     _ => {}
                 }
@@ -578,9 +890,18 @@ impl Router {
         out
     }
 
+    fn in_rest_zone(&self, x: f32, y: f32) -> bool {
+        let (_, area) = self.work_area();
+        let rz = self.cfg.rest_zone_mm * self.ppm();
+        if rz > 0.0 && (x < area.x + rz || x >= area.right() - rz || y >= area.bottom() - rz) {
+            return true;
+        }
+        self.cfg.rest_zones.iter().any(|f| Rect::from_frac(f, &area).contains(x, y))
+    }
+
     fn owner_for_down(&mut self, id: ContactId, x: f32, y: f32, major: i32, t: i64, out: &mut Vec<Out>) -> Owner {
         let strip = self.model.strip;
-        if self.panel_open && !self.edit {
+        if self.sheet_open && !self.edit {
             if let Some(b) = self.hit_button(x, y) {
                 return if strip.contains(x, y) { Owner::Strip { btn: Some(b), t0: t, long: false } } else { Owner::Button(b) };
             }
@@ -601,13 +922,27 @@ impl Router {
             }
             return Owner::Ignored;
         }
+        // M2 filters: pen near, rest zones, palms
+        if self.pen && self.cfg.pen_pause {
+            out.push(Out::Note(format!("pen: contact {} ignored", id)));
+            return Owner::Ignored;
+        }
+        if self.in_rest_zone(x, y) {
+            out.push(Out::Note(format!("rest zone: contact {} ignored", id)));
+            return Owner::Ignored;
+        }
+        let palm = self.cfg.palm_major > 0 && major > self.cfg.palm_major;
         for r in &self.model.regions {
             if !r.rect.contains(x, y) {
                 continue;
             }
             if r.id == TOUCHPAD {
-                if self.cfg.palm_major > 0 && major > self.cfg.palm_major {
+                if palm {
                     out.push(Out::Note(format!("palm: contact {} ignored (major {})", id, major)));
+                    return Owner::Ignored;
+                }
+                if self.cfg.dwt_ms > 0 && t - self.last_key_t < self.cfg.dwt_ms {
+                    out.push(Out::Note(format!("dwt: pad contact {} ignored ({} ms after a key)", id, t - self.last_key_t)));
                     return Owner::Ignored;
                 }
                 if let Some(p) = self.pad.as_mut() {
@@ -618,10 +953,21 @@ impl Router {
                 }
                 return Owner::Ignored;
             }
+            if palm && self.cfg.palm_keyboard {
+                out.push(Out::Note(format!("palm: contact {} on {} ignored (major {})", id, r.id, major)));
+                return Owner::Ignored;
+            }
+            if r.id == QUICK {
+                return match self.model.quick.iter().position(|q| q.rect.contains(x, y)) {
+                    Some(i) => Owner::Quick(i),
+                    None => Owner::Ignored,
+                };
+            }
             if let Some(k) = self.hit_key(x, y) {
                 let kind = self.model.keys[k].kind.clone();
-                let v = self.keys.down(id, k, &kind, t);
-                self.key_outs(v, out);
+                let long = self.model.keys[k].long.clone();
+                let v = self.keys.down(id, k, &kind, long.as_ref(), t);
+                self.key_outs(v, t, out);
                 return Owner::Key;
             }
             return Owner::Ignored;
@@ -638,33 +984,68 @@ impl Router {
         }
         self.arr_backup = self.arr.clone();
         self.edit = true;
-        self.panel_open = false;
+        self.sheet_open = false;
         out.push(Out::EditMode(true));
         out.extend(self.relayout());
     }
 
+    fn leave_edit(&mut self, out: &mut Vec<Out>) {
+        self.edit = false;
+        self.guides.clear();
+        out.push(Out::EditMode(false));
+    }
+
+    fn sheet_key(&self, i: u8) -> Option<String> {
+        self.sheet_keys.get(i as usize).cloned()
+    }
+
     fn fire(&mut self, b: Btn, out: &mut Vec<Out>) {
-        out.push(Out::Note(format!("button {}", b.name())));
+        let name = self.model.buttons.iter().find(|v| v.btn == b).map(|v| v.name.clone()).unwrap_or_default();
+        out.push(Out::Note(format!("button {}", name)));
         match b {
             Btn::Display => out.push(Out::UseAsDisplay),
             Btn::Exit => out.push(Out::Exit),
-            Btn::Layout | Btn::PanelLayout => out.push(Out::LayoutNext),
-            Btn::PanelAutostart => out.push(Out::AutostartNext),
+            Btn::Layout => out.push(Out::LayoutNext),
             Btn::Settings => {
-                self.panel_open = !self.panel_open;
-                out.push(Out::PanelOpen(self.panel_open));
+                self.sheet_open = !self.sheet_open;
+                out.push(Out::PanelOpen(self.sheet_open));
                 out.extend(self.relayout());
             }
             Btn::PanelClose => {
-                self.panel_open = false;
+                self.sheet_open = false;
                 out.push(Out::PanelOpen(false));
                 out.extend(self.relayout());
             }
-            Btn::PanelEdit => self.enter_edit(out),
+            Btn::SheetTab(i) => {
+                self.sheet_tab = i as usize;
+                self.sheet_page = 0;
+                out.extend(self.relayout());
+            }
+            Btn::SheetPrev | Btn::SheetNext => {
+                if b == Btn::SheetNext {
+                    self.sheet_page += 1;
+                    let n = self.sheet.get(self.sheet_tab).map(|m| m.rows.len()).unwrap_or(0);
+                    if self.sheet_page * self.sheet_keys.len().max(1) >= n {
+                        self.sheet_page = 0;
+                    }
+                } else {
+                    self.sheet_page = self.sheet_page.saturating_sub(1);
+                }
+                out.extend(self.relayout());
+            }
+            Btn::SheetRow(i) | Btn::SheetPlus(i) | Btn::SheetMinus(i) | Btn::SheetUp(i) => {
+                let Some(key) = self.sheet_key(i) else { return };
+                match (b, key.as_str()) {
+                    (_, "act.edit") => self.enter_edit(out),
+                    (_, "act.layout") => out.push(Out::LayoutNext),
+                    (Btn::SheetUp(_), _) => out.push(Out::SettingStep(key.replacen("quick:", "quick.up:", 1), -1)),
+                    (Btn::SheetMinus(_), _) => out.push(Out::SettingStep(key, -1)),
+                    _ => out.push(Out::SettingStep(key, 1)),
+                }
+            }
             Btn::Done => {
-                self.edit = false;
+                self.leave_edit(out);
                 self.arr_backup = None;
-                out.push(Out::EditMode(false));
                 out.push(Out::SaveArrangement);
                 out.extend(self.relayout());
             }
@@ -675,8 +1056,7 @@ impl Router {
             }
             Btn::Cancel => {
                 self.arr = self.arr_backup.take();
-                self.edit = false;
-                out.push(Out::EditMode(false));
+                self.leave_edit(out);
                 out.extend(self.relayout());
             }
         }
@@ -688,7 +1068,7 @@ impl Router {
             return out;
         }
         let v = self.keys.tick(t);
-        self.key_outs(v, &mut out);
+        self.key_outs(v, t, &mut out);
         let mut long = false;
         for tr in self.contacts.values_mut() {
             if let Owner::Strip { t0, long: l, .. } = &mut tr.owner {
@@ -740,7 +1120,7 @@ impl Router {
             out.push(Out::Pad(f));
         }
         for tr in self.contacts.values_mut() {
-            if matches!(tr.owner, Owner::Pad | Owner::Key) {
+            if matches!(tr.owner, Owner::Pad | Owner::Key | Owner::Quick(_)) {
                 tr.owner = Owner::Ignored;
             }
         }
@@ -757,7 +1137,8 @@ impl Router {
         out
     }
 
-    /// GEOM lines for logs and the tablet test runner: native touch coordinates of every button, region, zone and key
+    /// GEOM lines for logs and the tablet test runner: native touch coordinates of every button, region, zone,
+    /// quick action and key
     pub fn geom_lines(&self) -> Vec<String> {
         let Some(g) = self.geo else { return vec![] };
         let mut v = vec![];
@@ -767,7 +1148,7 @@ impl Router {
         };
         line("strip", &self.model.strip);
         for b in &self.model.buttons {
-            line(b.btn.name(), &b.rect);
+            line(&b.name, &b.rect);
         }
         for r in &self.model.regions {
             line(&format!("region.{}", r.id), &r.rect);
@@ -776,13 +1157,18 @@ impl Router {
             line("zone.left", l);
             line("zone.right", r);
         }
+        for q in &self.model.quick {
+            line(&format!("quick.{}", q.id), &q.rect);
+        }
         let mut seen = HashSet::new();
         for k in &self.model.keys {
             let n = match &k.kind {
                 KeyKind::Code(c) => format!("key.{}", keycodes::name(*c)),
+                KeyKind::Combo(v) => format!("key.{}", v.iter().map(|c| keycodes::name(*c)).collect::<Vec<_>>().join("+")),
                 KeyKind::Action(Action::Page(p)) => format!("key.page:{}", p),
                 KeyKind::Action(Action::LayoutNext) => "key.layout:next".into(),
                 KeyKind::Action(Action::KeyboardHide) => "key.keyboard:hide".into(),
+                KeyKind::Action(Action::Fn) => "key.fn".into(),
                 KeyKind::Gap => continue,
             };
             if seen.insert(n.clone()) {
@@ -817,13 +1203,19 @@ mod tests {
 
     /// native touch coordinates of the centre of a GEOM name
     fn at(r: &Router, name: &str) -> (i32, i32) {
-        let l = r.geom_lines().into_iter().find(|l| l.contains(&format!("name={} ", name))).unwrap_or_else(|| panic!("no {}", name));
-        let n: Vec<i32> = l.split("native=").nth(1).unwrap().split(' ').next().unwrap().split(',').map(|x| x.parse().unwrap()).collect();
+        let n = boxn(r, name);
         ((n[0] + n[2]) / 2, (n[1] + n[3]) / 2)
+    }
+    fn boxn(r: &Router, name: &str) -> Vec<i32> {
+        let l = r.geom_lines().into_iter().find(|l| l.contains(&format!("name={} ", name))).unwrap_or_else(|| panic!("no {}", name));
+        l.split("native=").nth(1).unwrap().split(' ').next().unwrap().split(',').map(|x| x.parse().unwrap()).collect()
     }
 
     fn down(r: &mut Router, id: u32, p: (i32, i32), t: i64) -> Vec<Out> {
         r.contact(Contact::Down { id, x: p.0, y: p.1, major: 10 }, t)
+    }
+    fn downm(r: &mut Router, id: u32, p: (i32, i32), major: i32, t: i64) -> Vec<Out> {
+        r.contact(Contact::Down { id, x: p.0, y: p.1, major }, t)
     }
     fn mv(r: &mut Router, id: u32, p: (i32, i32), t: i64) -> Vec<Out> {
         r.contact(Contact::Move { id, x: p.0, y: p.1, major: 10 }, t)
@@ -841,6 +1233,27 @@ mod tests {
     }
     fn keys(o: &[Out]) -> Vec<(u16, bool)> {
         o.iter().filter_map(|x| if let Out::Key(c, p) = x { Some((*c, *p)) } else { None }).collect()
+    }
+    fn tap(r: &mut Router, id: u32, name: &str, t: i64) -> Vec<Out> {
+        dn(r, id, name, t);
+        up(r, id, t + 30)
+    }
+    /// the replay tool's drag: press, 10 ms steps, release
+    fn drag(r: &mut Router, id: u32, a: (i32, i32), b: (i32, i32), ms: i64, t: i64) -> Vec<Out> {
+        let mut o = down(r, id, a, t);
+        let steps = (ms / 10).max(2);
+        for i in 1..=steps {
+            let f = i as f64 / steps as f64;
+            o.extend(mv(r, id, (a.0 + ((b.0 - a.0) as f64 * f) as i32, a.1 + ((b.1 - a.1) as f64 * f) as i32), t + 30 + i * 10));
+        }
+        o.extend(up(r, id, t + 80 + steps * 10));
+        o
+    }
+    fn edit_on(r: &mut Router, id: u32, t: i64) {
+        dn(r, id, "strip", t);
+        r.tick(t + 700);
+        up(r, id, t + 800);
+        assert!(r.editing());
     }
 
     #[test]
@@ -900,7 +1313,6 @@ mod tests {
     #[test]
     fn contact_stays_with_its_start_region() {
         let mut r = router("full");
-        // starts on the pad, slides over the keyboard: still a pad finger, no key
         dn(&mut r, 1, "region.touchpad", 0);
         let o = mvn(&mut r, 1, "key.KEY_A", 20);
         assert!(keys(&o).is_empty());
@@ -933,6 +1345,7 @@ mod tests {
         down(&mut r, 1, p, 0);
         up(&mut r, 1, 30);
         assert!(r.geom_lines().iter().any(|l| l.contains("key.KEY_1 ")), "symbols page shown");
+        assert!(r.geom_lines().iter().any(|l| l.contains("key.KEY_LEFTSHIFT+KEY_2 ")), "combo keys on the symbols page");
         r.set_layout(layout("split"), None);
         let names: Vec<String> = r.model().regions.iter().map(|x| x.id.clone()).collect();
         assert_eq!(names, vec!["touchpad", "keyboard_left", "keyboard_right"]);
@@ -945,14 +1358,12 @@ mod tests {
     fn edit_mode_move_resize_done_cancel_reset() {
         let mut r = router("full");
         let before = r.arrangement().get(TOUCHPAD).unwrap();
-        // long press on the strip enters edit mode
         dn(&mut r, 1, "strip", 0);
         assert_eq!(r.next_deadline(), Some(700));
         let o = r.tick(700);
         assert!(o.contains(&Out::EditMode(true)) && r.editing());
         let o = up(&mut r, 1, 800);
         assert!(!o.iter().any(|x| matches!(x, Out::UseAsDisplay | Out::Exit | Out::LayoutNext)), "no button after a long press");
-        // move the touchpad 100 px left
         let c = at(&r, "region.touchpad");
         let g = geo();
         down(&mut r, 2, c, 1000);
@@ -960,17 +1371,15 @@ mod tests {
         let to = g.logical_to_touch(lx - 100.0, ly);
         let o = mv(&mut r, 2, to, 1100);
         assert!(o.contains(&Out::Static));
+        assert!(!o.contains(&Out::PadChanged), "no device recreation while dragging");
         up(&mut r, 2, 1200);
         let moved = r.arrangement().get(TOUCHPAD).unwrap();
         assert!((moved.x - (before.x - 100.0 / 1696.0)).abs() < 0.002, "{:?} {:?}", before, moved);
-        // Done persists
         dn(&mut r, 3, "strip.done", 1300);
         let o = up(&mut r, 3, 1350);
         assert!(o.contains(&Out::SaveArrangement) && !r.editing());
-        // edit again, resize the bottom-right corner, then Cancel restores
-        dn(&mut r, 4, "strip", 2000);
-        r.tick(2700);
-        up(&mut r, 4, 2800);
+        assert!(!o.contains(&Out::PadChanged), "a move keeps the size: same device");
+        edit_on(&mut r, 4, 2000);
         let pr = r.model().regions.iter().find(|x| x.id == TOUCHPAD).unwrap().rect;
         let corner = g.logical_to_touch(pr.right() - 5.0, pr.bottom() - 5.0);
         down(&mut r, 5, corner, 3000);
@@ -981,33 +1390,80 @@ mod tests {
         dn(&mut r, 6, "strip.cancel", 3300);
         up(&mut r, 6, 3350);
         assert_eq!(r.arrangement().get(TOUCHPAD).unwrap(), moved);
-        // Reset -> defaults
-        dn(&mut r, 7, "strip", 4000);
-        r.tick(4700);
-        up(&mut r, 7, 4800);
+        edit_on(&mut r, 7, 4000);
         dn(&mut r, 8, "strip.reset", 5000);
         let o = up(&mut r, 8, 5050);
         assert!(o.contains(&Out::ResetArrangement));
         assert_eq!(r.arrangement().get(TOUCHPAD).unwrap(), before);
     }
 
+    /// M1 T7 failure reproduced: the runner moved the touchpad 2500 native units left, then dragged its
+    /// bottom-right corner (250 units inside, at the panel's bottom edge) by (-2250, -1250). M1 recreated the
+    /// virtual touchpad on every drag step, so the daemon lagged and the runner read a stale corner; here the
+    /// sequence runs as the runner does it, reading the corner from the GEOM lines after the move.
+    #[test]
+    fn runner_t7_drag_sequence_resizes() {
+        let mut r = router("full");
+        let b0 = boxn(&r, "region.touchpad");
+        edit_on(&mut r, 1, 0);
+        let (cx, cy) = ((b0[0] + b0[2]) / 2, (b0[1] + b0[3]) / 2);
+        let o = drag(&mut r, 2, (cx, cy), (cx - 2500, cy), 500, 1000);
+        assert!(!o.contains(&Out::PadChanged));
+        let b1 = boxn(&r, "region.touchpad");
+        assert!(b1[0] < b0[0]);
+        let (a1, bb1) = (b1[2], b1[3]);
+        assert_eq!(bb1, 24000, "the touchpad sits on the panel's bottom edge");
+        let o = drag(&mut r, 3, (a1 - 250, bb1 - 250), (a1 - 2500, bb1 - 1500), 500, 3000);
+        assert!(!o.contains(&Out::PadChanged));
+        let b2 = boxn(&r, "region.touchpad");
+        assert!(b2[2] - b2[0] < b1[2] - b1[0] && b2[3] - b2[1] < b1[3] - b1[1], "resized smaller: {:?} -> {:?}", b1, b2);
+        assert_eq!((b2[0], b2[1]), (b1[0], b1[1]), "the top-left corner stays");
+        // Done: now the virtual touchpad is recreated once with the new size
+        let o = tap(&mut r, 4, "strip.done", 5000);
+        assert!(o.contains(&Out::SaveArrangement) && o.contains(&Out::PadChanged));
+        let (xm, ym, _) = r.pad_spec().unwrap();
+        assert!((xm as f32 - (b2[2] - b2[0]) as f32).abs() < 200.0 && (ym as f32 - (b2[3] - b2[1]) as f32).abs() < 200.0, "{} {} {:?}", xm, ym, b2);
+    }
+
+    #[test]
+    fn edge_handles_and_guides() {
+        let mut r = router("full");
+        edit_on(&mut r, 1, 0);
+        let g = geo();
+        let pr = r.model().regions.iter().find(|x| x.id == TOUCHPAD).unwrap().rect;
+        // left edge, middle height: only the left side moves
+        let p = g.logical_to_touch(pr.x + 3.0, pr.y + pr.h / 2.0);
+        down(&mut r, 2, p, 1000);
+        mv(&mut r, 2, g.logical_to_touch(pr.x + 80.0, pr.y + pr.h / 2.0 + 40.0), 1100);
+        let nr = r.model().regions.iter().find(|x| x.id == TOUCHPAD).unwrap().rect;
+        assert!((nr.x - (pr.x + 77.0)).abs() < 1.0 && (nr.right() - pr.right()).abs() < 0.5 && (nr.y - pr.y).abs() < 0.01 && (nr.h - pr.h).abs() < 0.01, "{:?} {:?}", pr, nr);
+        // dragging the top edge up to the keyboard snaps and shows a guide while the finger is down
+        up(&mut r, 2, 1200);
+        let kb = r.model().regions.iter().find(|x| x.id == "keyboard").unwrap().rect;
+        let nr = r.model().regions.iter().find(|x| x.id == TOUCHPAD).unwrap().rect;
+        let p = g.logical_to_touch(nr.x + nr.w / 2.0, nr.y + 2.0);
+        down(&mut r, 3, p, 2000);
+        mv(&mut r, 3, g.logical_to_touch(nr.x + nr.w / 2.0, kb.bottom() + 6.0), 2100);
+        let m = r.model();
+        let tp = m.regions.iter().find(|x| x.id == TOUCHPAD).unwrap().rect;
+        assert!((tp.y - kb.bottom()).abs() < 0.5, "snapped onto the keyboard edge: {} vs {}", tp.y, kb.bottom());
+        assert!(m.guides.iter().any(|gd| !gd.vertical && (gd.pos - kb.bottom()).abs() < 0.5));
+        up(&mut r, 3, 2200);
+        assert!(r.model().guides.is_empty(), "guides vanish on release");
+    }
+
     #[test]
     fn edit_never_overlaps_strip_or_regions() {
         let mut r = router("full");
-        dn(&mut r, 1, "strip", 0);
-        r.tick(700);
-        up(&mut r, 1, 800);
-        let g = geo();
+        edit_on(&mut r, 1, 0);
         let c = at(&r, "region.touchpad");
         down(&mut r, 2, c, 1000);
-        // drag far up into the keyboard and the strip
         mv(&mut r, 2, (c.0, 0), 1100);
         up(&mut r, 2, 1200);
         let m = r.model();
         let tp = m.regions.iter().find(|x| x.id == TOUCHPAD).unwrap().rect;
         let kb = m.regions.iter().find(|x| x.id == "keyboard").unwrap().rect;
         assert!(!tp.overlaps(&kb) && tp.y >= m.strip.bottom() - 0.01, "{:?} {:?}", tp, kb);
-        let _ = g;
     }
 
     #[test]
@@ -1023,7 +1479,6 @@ mod tests {
         assert!(!r.tick(2000).contains(&Out::FiveFinger), "fires once");
         let o = r.release_all();
         assert!(o.iter().any(|x| matches!(x, Out::Pad(f) if f.slots.iter().all(|s| s.is_none()))));
-        // moving fingers do not trigger it
         let mut r = router("full");
         for i in 0..5 {
             down(&mut r, i + 1, (c.0 + i as i32 * 1500, c.1), 0);
@@ -1032,20 +1487,131 @@ mod tests {
         assert!(!r.tick(900).contains(&Out::FiveFinger));
     }
 
+    fn sheet_data() -> Vec<SheetModule> {
+        let cfg = toml::Value::try_from(crate::config::Config::default()).unwrap();
+        crate::settings::MODULES
+            .iter()
+            .map(|m| SheetModule { id: m.id.into(), title: m.title.into(), live: m.implemented, plan: m.plan.into(), rows: crate::settings::rows(m.id, &cfg, &HashSet::new()) })
+            .collect()
+    }
+
     #[test]
-    fn settings_panel() {
+    fn settings_sheet_tabs_rows_steps() {
         let mut r = router("full");
-        dn(&mut r, 1, "strip.settings", 0);
-        let o = up(&mut r, 1, 30);
+        r.set_sheet(sheet_data());
+        let o = tap(&mut r, 1, "strip.settings", 0);
         assert!(o.contains(&Out::PanelOpen(true)));
-        dn(&mut r, 2, "panel.autostart", 100);
-        assert!(up(&mut r, 2, 130).contains(&Out::AutostartNext));
-        // keys under the panel do not type while it is open
-        let o = dn(&mut r, 3, "region.touchpad", 200);
+        assert!(r.model().sheet.is_some());
+        // general tab: autostart row steps
+        let o = tap(&mut r, 2, "sheet.row.autostart", 100);
+        assert!(o.contains(&Out::SettingStep("autostart".into(), 1)));
+        // pointer tab: natural scroll toggles, speed has minus / plus
+        tap(&mut r, 3, "sheet.tab.pointer", 200);
+        assert_eq!(r.model().sheet.as_ref().unwrap().title, "Touchpad");
+        assert!(tap(&mut r, 4, "sheet.row.natural_scroll", 300).contains(&Out::SettingStep("natural_scroll".into(), 1)));
+        assert!(tap(&mut r, 5, "sheet.minus.speed", 400).contains(&Out::SettingStep("speed".into(), -1)));
+        assert!(tap(&mut r, 6, "sheet.plus.speed", 500).contains(&Out::SettingStep("speed".into(), 1)));
+        // a planned module is marked
+        tap(&mut r, 7, "sheet.tab.gestures", 600);
+        assert!(r.model().sheet.as_ref().unwrap().subtitle.contains("planned"));
+        // touches on the pad under the sheet do nothing
+        let o = dn(&mut r, 8, "region.touchpad", 700);
         assert!(!o.iter().any(|x| matches!(x, Out::Pad(_))));
-        up(&mut r, 3, 230);
-        dn(&mut r, 4, "panel.close", 300);
-        assert!(up(&mut r, 4, 330).contains(&Out::PanelOpen(false)));
+        up(&mut r, 8, 730);
+        // "Move / resize areas" from the sheet enters edit mode
+        tap(&mut r, 9, "sheet.tab.general", 800);
+        tap(&mut r, 10, "sheet.row.act.edit", 900);
+        assert!(r.editing() && !r.sheet_open());
+        tap(&mut r, 11, "strip.cancel", 1000);
+        tap(&mut r, 12, "strip.settings", 1100);
+        assert!(tap(&mut r, 13, "panel.close", 1200).contains(&Out::PanelOpen(false)));
+    }
+
+    #[test]
+    fn quick_actions_region_and_taps() {
+        let mut cfg = RouterCfg::default();
+        cfg.quick = true;
+        let mut r = Router::new(cfg, layout("full"));
+        r.set_quick(vec![("copy".into(), "Copy".into(), 1), ("paste".into(), "Paste".into(), 2), ("vol_up".into(), "Vol +".into(), 1)]);
+        r.set_geometry(geo());
+        assert!(r.model().regions.iter().any(|x| x.id == QUICK));
+        let p = boxn(&r, "quick.paste");
+        let c = boxn(&r, "quick.copy");
+        assert!((p[3] - p[1]) > (c[3] - c[1]) || (p[2] - p[0]) > (c[2] - c[0]), "size 2 is bigger");
+        let o = tap(&mut r, 1, "quick.copy", 0);
+        assert!(o.contains(&Out::Quick("copy".into())));
+        // slide off: nothing
+        dn(&mut r, 2, "quick.vol_up", 100);
+        mvn(&mut r, 2, "region.touchpad", 120);
+        assert!(!up(&mut r, 2, 140).iter().any(|x| matches!(x, Out::Quick(_))));
+        // the quick bar is a region of edit mode too
+        edit_on(&mut r, 3, 1000);
+        assert!(r.model().regions.iter().any(|x| x.id == QUICK));
+    }
+
+    #[test]
+    fn palm_rest_zone_dwt_and_pen() {
+        let mut cfg = RouterCfg::default();
+        cfg.palm_major = 60;
+        cfg.rest_zone_mm = 8.0;
+        cfg.dwt_ms = 300;
+        let mut r = Router::new(cfg, layout("full"));
+        r.set_geometry(geo());
+        // a large contact on the pad and on a key: ignored
+        let c = at(&r, "region.touchpad");
+        let o = downm(&mut r, 1, c, 120, 0);
+        assert!(!o.iter().any(|x| matches!(x, Out::Pad(_))) && o.iter().any(|x| matches!(x, Out::Note(n) if n.starts_with("palm"))));
+        up(&mut r, 1, 20);
+        let a = at(&r, "key.KEY_A");
+        downm(&mut r, 2, a, 120, 100);
+        assert!(keys(&up(&mut r, 2, 130)).is_empty(), "palm on the keys");
+        // a normal finger works
+        down(&mut r, 3, a, 200);
+        assert_eq!(keys(&up(&mut r, 3, 230)).len(), 2);
+        // pad touch 100 ms after a key: held back (dwt); 400 ms after: fine
+        let o = down(&mut r, 4, c, 330);
+        assert!(!o.iter().any(|x| matches!(x, Out::Pad(_))));
+        up(&mut r, 4, 340);
+        let o = down(&mut r, 5, c, 700);
+        assert!(o.iter().any(|x| matches!(x, Out::Pad(_))));
+        up(&mut r, 5, 720);
+        // rest zone at the bottom edge of the panel (the click zones end there)
+        let g = geo();
+        let o = down(&mut r, 6, g.logical_to_touch(c.0 as f32 * 0.05, 1198.0), 2000);
+        assert!(o.iter().any(|x| matches!(x, Out::Note(n) if n.starts_with("rest zone"))));
+        up(&mut r, 6, 2010);
+        // pen near: everything paused
+        r.set_pen(true);
+        let o = down(&mut r, 7, c, 3000);
+        assert!(!o.iter().any(|x| matches!(x, Out::Pad(_))));
+        up(&mut r, 7, 3010);
+        r.set_pen(false);
+        assert!(down(&mut r, 8, c, 4000).iter().any(|x| matches!(x, Out::Pad(_))));
+    }
+
+    #[test]
+    fn sticky_fn_and_long_press_through_the_router() {
+        let mut cfg = RouterCfg::default();
+        cfg.sticky = true;
+        let mut r = Router::new(cfg, layout("full"));
+        r.set_geometry(geo());
+        tap(&mut r, 1, "key.KEY_LEFTSHIFT", 0);
+        assert_eq!(r.model().latched, vec![(42, false)], "latched Shift drawn");
+        let mut o = dn(&mut r, 2, "key.KEY_A", 100);
+        o.extend(up(&mut r, 2, 130));
+        assert_eq!(keys(&o), vec![(30, true), (30, false), (42, false)]);
+        // Fn + 1 = F1
+        dn(&mut r, 3, "key.fn", 200);
+        assert!(r.model().fn_on);
+        let o = tap(&mut r, 4, "key.KEY_1", 210);
+        assert_eq!(keys(&o), vec![(59, true), (59, false)]);
+        up(&mut r, 3, 300);
+        // tablet: long press Q = 1
+        r.set_layout(layout("tablet"), None);
+        dn(&mut r, 5, "key.KEY_Q", 1000);
+        let o = r.tick(1450);
+        assert_eq!(keys(&o), vec![(2, true), (2, false)]);
+        assert!(keys(&up(&mut r, 5, 1500)).is_empty());
     }
 
     #[test]
@@ -1057,7 +1623,6 @@ mod tests {
         let m = r.model();
         let tp = m.regions.iter().find(|x| x.id == TOUCHPAD).unwrap().rect;
         assert!(tp.y < 400.0, "portrait default puts the pad on top: {:?}", tp);
-        // a touch at the pad centre (in rotated native coordinates) reaches the pad
         let c = at(&r, "region.touchpad");
         let o = down(&mut r, 1, c, 0);
         assert!(o.iter().any(|x| matches!(x, Out::Pad(_))));

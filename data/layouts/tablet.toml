@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
 # DexHid layout: simplified tablet keyboard (letters page + a numbers / symbols page, like an on-screen keyboard).
 # The symbols page sends the punctuation keys of the desktop's layout (legends follow xkb); keys that need a
-# modifier for one symbol ("@" on one key) come in M2 (combo keys).
+# modifier for one symbol use combo keys (M2: "LEFTSHIFT+2" = Shift+2; the legend shows what the desktop layout
+# types). Long press on the top letter row gives the digits (M2 long-press alternates).
 name = "tablet"
 title = "Tablet keyboard"
 description = "Letters and a numbers / symbols page"
@@ -14,8 +15,8 @@ id = "main"
 
 [[part.page.row]]
 keys = [
-  { key = "Q" }, { key = "W" }, { key = "E" }, { key = "R" }, { key = "T" },
-  { key = "Y" }, { key = "U" }, { key = "I" }, { key = "O" }, { key = "P" }, { key = "BACKSPACE", label = "⌫" },
+  { key = "Q", long = "1" }, { key = "W", long = "2" }, { key = "E", long = "3" }, { key = "R", long = "4" }, { key = "T", long = "5" },
+  { key = "Y", long = "6" }, { key = "U", long = "7" }, { key = "I", long = "8" }, { key = "O", long = "9" }, { key = "P", long = "0" }, { key = "BACKSPACE", label = "⌫" },
 ]
 
 [[part.page.row]]
@@ -36,7 +37,7 @@ keys = [
 keys = [
   { action = "page:sym", w = 1.5, label = "?123" }, { key = "LEFTCTRL", w = 1.5 },
   { key = "SPACE", w = 5 },
-  { key = "LEFT" }, { key = "RIGHT" }, { key = "ESC" },
+  { key = "LEFT" }, { key = "RIGHT" }, { action = "fn", label = "Fn" }, { key = "ESC" },
 ]
 
 [[part.page]]
@@ -60,6 +61,14 @@ keys = [
   { key = "LEFTSHIFT", w = 2, label = "⇧" }, { key = "TAB", w = 1.5 },
   { key = "HOME" }, { key = "END" }, { key = "PAGEUP" }, { key = "PAGEDOWN" },
   { key = "DELETE" }, { key = "INSERT" }, { key = "UP", w = 1.5 },
+]
+
+[[part.page.row]]
+height = 0.9
+keys = [
+  { key = "LEFTSHIFT+1" }, { key = "LEFTSHIFT+2" }, { key = "LEFTSHIFT+3" }, { key = "LEFTSHIFT+4" }, { key = "LEFTSHIFT+5" },
+  { key = "LEFTSHIFT+6" }, { key = "LEFTSHIFT+7" }, { key = "LEFTSHIFT+8" }, { key = "LEFTSHIFT+9" }, { key = "LEFTSHIFT+0" },
+  { key = "LEFTSHIFT+MINUS" },
 ]
 
 [[part.page.row]]

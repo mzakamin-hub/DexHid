@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# DexHid layout (M2): media + presentation remote. Big previous / next slide keys (PgUp / PgDn work in most
+# presentation apps), start (F5) / end (Esc), black screen (B), media and volume keys.
+# Laser-pointer mode and the talk timer are the planned "Media / presentation" module (M3).
+name = "remote"
+title = "Media / presentation"
+description = "Slides back / next, start / end, black screen, media and volume"
+
+[[part]]
+region = "keyboard"
+
+[[part.page]]
+id = "main"
+
+[[part.page.row]]
+height = 2
+keys = [ { key = "PAGEUP", w = 2, label = "◀ Back" }, { key = "PAGEDOWN", w = 3, label = "Next ▶" } ]
+
+[[part.page.row]]
+keys = [ { key = "F5", label = "Start" }, { key = "LEFTSHIFT+F5", label = "From here" }, { key = "B", label = "Black" }, { key = "ESC", label = "End" }, { key = "HOME", label = "First" } ]
+
+[[part.page.row]]
+keys = [ { key = "PREVIOUSSONG" }, { key = "PLAYPAUSE" }, { key = "NEXTSONG" }, { key = "VOLUMEDOWN" }, { key = "VOLUMEUP" } ]

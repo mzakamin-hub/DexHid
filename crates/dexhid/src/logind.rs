@@ -21,7 +21,7 @@ fn get_bool(c: &Connection, path: &str, iface: &str, prop: &str) -> Option<bool>
     get_prop(c, path, iface, prop).and_then(|v| bool::try_from(v).ok())
 }
 
-fn session_path(c: &Connection) -> Option<String> {
+pub fn session_path(c: &Connection) -> Option<String> {
     let uid = unsafe { libc::getuid() };
     let m = c.call_method(Some(LOGIN1), MGR_PATH, Some(MGR), "GetUser", &(uid,)).ok()?;
     let user: OwnedObjectPath = m.body().deserialize().ok()?;

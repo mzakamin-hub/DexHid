@@ -6,20 +6,11 @@ use ab_glyph::{Font, FontVec, PxScale, ScaleFont};
 use dexhid_core::geom::Rect;
 use std::collections::HashMap;
 
-pub const BG: u32 = 0xff101318;
-pub const STRIP: u32 = 0xff1b2028;
+// prompt / pill colours (the pad-mode overlay uses the theme palette, dexhid_core::feedback::palette)
 pub const BTN: u32 = 0xff2b3442;
 pub const BTN_LIT: u32 = 0xff3f7fd0;
-pub const KEY: u32 = 0xff262c36;
-pub const KEY_MOD: u32 = 0xff1f242c;
-pub const KEY_LIT: u32 = 0xff4a8be0;
-pub const PAD: u32 = 0xff181d24;
-pub const PAD_EDGE: u32 = 0xff3a4554;
-pub const ZONE: u32 = 0xff1d232c;
 pub const TEXT: u32 = 0xffe8ecf2;
 pub const TEXT_DIM: u32 = 0xff8b95a5;
-pub const EDIT: u32 = 0xffe0a030;
-pub const DOT: u32 = 0xc04a8be0;
 pub const CARD: u32 = 0xf0202630;
 pub const SHADE: u32 = 0x00000000;
 

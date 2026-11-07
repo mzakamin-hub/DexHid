@@ -11,7 +11,19 @@ use std::time::Duration;
 pub const EV_SYN: u16 = 0x00;
 pub const EV_KEY: u16 = 0x01;
 pub const EV_ABS: u16 = 0x03;
+pub const EV_REL: u16 = 0x02;
 pub const EV_SW: u16 = 0x05;
+pub const EV_LED: u16 = 0x11;
+pub const LED_NUML: u16 = 0x00;
+pub const LED_CAPSL: u16 = 0x01;
+pub const LED_SCROLLL: u16 = 0x02;
+pub const REL_X: u16 = 0x00;
+pub const REL_Y: u16 = 0x01;
+pub const REL_HWHEEL: u16 = 0x06;
+pub const REL_WHEEL: u16 = 0x08;
+pub const REL_WHEEL_HI_RES: u16 = 0x0b;
+pub const REL_HWHEEL_HI_RES: u16 = 0x0c;
+pub const BUS_BLUETOOTH: u16 = 0x05;
 pub const SYN_REPORT: u16 = 0;
 pub const SYN_DROPPED: u16 = 3;
 
@@ -118,7 +130,9 @@ const UI_DEV_SETUP: c_ulong = ioc(IOC_WRITE, b'U', 3, std::mem::size_of::<Uinput
 const UI_ABS_SETUP: c_ulong = ioc(IOC_WRITE, b'U', 4, std::mem::size_of::<UinputAbsSetup>());
 const UI_SET_EVBIT: c_ulong = ioc(IOC_WRITE, b'U', 100, 4);
 const UI_SET_KEYBIT: c_ulong = ioc(IOC_WRITE, b'U', 101, 4);
+const UI_SET_RELBIT: c_ulong = ioc(IOC_WRITE, b'U', 102, 4);
 const UI_SET_ABSBIT: c_ulong = ioc(IOC_WRITE, b'U', 103, 4);
+const UI_SET_LEDBIT: c_ulong = ioc(IOC_WRITE, b'U', 105, 4);
 const UI_SET_PROPBIT: c_ulong = ioc(IOC_WRITE, b'U', 110, 4);
 fn ui_get_sysname(len: usize) -> c_ulong { ioc(IOC_READ, b'U', 44, len) }
 
@@ -360,6 +374,16 @@ pub struct UinputSpec<'a> {
     pub keys: Vec<u16>,
     pub abs: Vec<(u16, AbsInfo)>,
     pub props: Vec<u16>,
+    /// M2: relative axes, LEDs (written back by the desktop, read from the uinput fd), bus type (0 = virtual)
+    pub rels: Vec<u16>,
+    pub leds: Vec<u16>,
+    pub bus: u16,
+}
+
+impl<'a> UinputSpec<'a> {
+    pub fn new(name: &'a str) -> UinputSpec<'a> {
+        UinputSpec { name, keys: vec![], abs: vec![], props: vec![], rels: vec![], leds: vec![], bus: 0 }
+    }
 }
 
 fn ioctl_int(fd: c_int, req: c_ulong, v: u16) -> Result<(), String> {
@@ -387,9 +411,17 @@ impl Uinput {
                 if r < 0 { return Err(format!("UI_ABS_SETUP {}: {}", code, strerr(errno()))); }
             }
         }
+        if !spec.rels.is_empty() {
+            ioctl_int(fd, UI_SET_EVBIT, EV_REL)?;
+            for &r in &spec.rels { ioctl_int(fd, UI_SET_RELBIT, r)?; }
+        }
+        if !spec.leds.is_empty() {
+            ioctl_int(fd, UI_SET_EVBIT, EV_LED)?;
+            for &l in &spec.leds { ioctl_int(fd, UI_SET_LEDBIT, l)?; }
+        }
         for &p in &spec.props { ioctl_int(fd, UI_SET_PROPBIT, p)?; }
         let mut setup = UinputSetup {
-            id: InputId { bustype: BUS_VIRTUAL, vendor: 0x1d6b, product: 0xde01, version: 1 },
+            id: InputId { bustype: if spec.bus == 0 { BUS_VIRTUAL } else { spec.bus }, vendor: 0x1d6b, product: 0xde01, version: 1 },
             name: [0u8; 80],
             ff_effects_max: 0,
         };
@@ -429,6 +461,19 @@ impl Uinput {
         }
     }
     pub fn syn(&self) { self.emit(EV_SYN, SYN_REPORT, 0) }
+    /// events the kernel writes back to a uinput device (EV_LED from the desktop), non-blocking
+    pub fn read_back(&self) -> Vec<InputEvent> {
+        let mut out = vec![];
+        let mut buf = [InputEvent::default(); 16];
+        loop {
+            let r = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, std::mem::size_of_val(&buf)) };
+            if r <= 0 { break; }
+            let n = r as usize / std::mem::size_of::<InputEvent>();
+            out.extend_from_slice(&buf[..n]);
+            if n < buf.len() { break; }
+        }
+        out
+    }
     pub fn destroy(&mut self) {
         if !self.destroyed {
             unsafe {

@@ -56,8 +56,120 @@ pub struct Config {
     pub key_gap_mm: f32,
     /// xkb layout group used for the legends (the active group is not visible to an unfocused client)
     pub xkb_layout_index: u32,
-    /// "dark" (M2: more themes)
+    /// "dark" | "light" | "amoled" | "auto" (follow the desktop's colour scheme)
     pub theme: String,
+    // ---- M2 settings (all in the settings sheet, see settings.rs)
+    /// "touchpad" (libinput touchpad) | "mouse" (own recognizer, relative mouse)
+    pub mode: String,
+    /// applied through the desktop's input settings (KWin InputDevice) for the virtual touchpad
+    pub natural_scroll: bool,
+    pub tap_to_click: bool,
+    /// desktop pointer acceleration -1..1 (KWin pointerAcceleration)
+    pub pointer_accel: f32,
+    /// "zones+tap" | "tap" | "zones": DexHid click zones and / or the desktop's two-finger tap
+    pub right_click: String,
+    /// dim the internal panel while in pad mode (logind SetBrightness), restored on release / `dexhid --restore`
+    pub dim: bool,
+    pub dim_percent: u32,
+    /// backlight device name in /sys/class/backlight, or "auto" (the first one)
+    pub backlight: String,
+    pub sticky_modifiers: bool,
+    /// long press on a key with an alternate (`long = ...` in the layout) sends the alternate
+    pub long_press_ms: i64,
+    /// palm check (palm_major) also on the keyboard regions
+    pub palm_keyboard: bool,
+    /// touches starting this close to the panel's left / right / bottom edge are ignored (0 = off)
+    pub rest_zone_mm: f32,
+    /// extra rest zones: [x, y, w, h] fractions of the area below the bar
+    pub rest_zones: Vec<[f32; 4]>,
+    /// pad touches starting this soon after a key press are ignored (own disable-while-typing, 0 = off)
+    pub dwt_ms: i64,
+    /// ignore new touches while the pen is in proximity
+    pub pen_pause: bool,
+    /// accent colour "#rrggbb"
+    pub accent: String,
+    /// key opacity in %
+    pub key_alpha: u32,
+    /// battery / charger / external display info in the bar
+    pub status_info: bool,
+    pub sound_feedback: bool,
+    pub haptic_feedback: bool,
+    /// follow the desktop's active keyboard layout for the legends (KDE: org.kde.keyboard)
+    pub track_layout: bool,
+    pub quick_actions: QuickCfg,
+    /// planned feature modules (stored and shown in the settings sheet; acted on from M3)
+    pub features: Features,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct QuickCfg {
+    pub enabled: bool,
+    /// shown actions in order; "id" or "id:2" (double width)
+    pub actions: Vec<String>,
+    pub custom: Vec<CustomAction>,
+}
+
+impl Default for QuickCfg {
+    fn default() -> QuickCfg {
+        QuickCfg {
+            enabled: true,
+            actions: ["copy", "paste", "undo", "redo", "alt_tab", "show_desktop", "screenshot", "vol_down", "vol_up", "play_pause"].iter().map(|s| s.to_string()).collect(),
+            custom: vec![],
+        }
+    }
+}
+
+/// a user action: a key chord ("LEFTCTRL+LEFTSHIFT+T") or a command line (argv list, no shell)
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct CustomAction {
+    pub id: String,
+    pub label: String,
+    pub keys: String,
+    pub command: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct Feature {
+    pub enabled: bool,
+    pub options: BTreeMap<String, toml::Value>,
+}
+
+fn feat(opts: &[(&str, toml::Value)]) -> Feature {
+    Feature { enabled: false, options: opts.iter().map(|(k, v)| (k.to_string(), v.clone())).collect() }
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Features {
+    pub gestures: Feature,
+    pub clipboard: Feature,
+    pub textedit: Feature,
+    pub remote: Feature,
+    pub pen: Feature,
+    pub suggest: Feature,
+    pub profiles: Feature,
+    pub mirror: Feature,
+    pub wireless: Feature,
+}
+
+impl Default for Features {
+    fn default() -> Features {
+        use toml::Value::{Boolean as B, Integer as I, String as S};
+        Features {
+            gestures: feat(&[("three_swipe", S("desktop".into())), ("four_swipe", S("overview".into())), ("three_tap", S("middle-click".into()))]),
+            clipboard: feat(&[("items", I(8))]),
+            textedit: feat(&[("joystick", B(false))]),
+            remote: feat(&[("laser", B(false)), ("timer_min", I(0))]),
+            pen: feat(&[("mode", S("pointer".into()))]),
+            suggest: feat(&[]),
+            profiles: feat(&[("per_app", B(false))]),
+            mirror: feat(&[("fps", I(5))]),
+            wireless: feat(&[]),
+        }
+    }
 }
 
 impl Default for Config {
@@ -90,13 +202,102 @@ impl Default for Config {
             key_gap_mm: 1.2,
             xkb_layout_index: 0,
             theme: "dark".into(),
+            mode: "touchpad".into(),
+            natural_scroll: false,
+            tap_to_click: true,
+            pointer_accel: 0.0,
+            right_click: "zones+tap".into(),
+            dim: true,
+            dim_percent: 20,
+            backlight: "auto".into(),
+            sticky_modifiers: false,
+            long_press_ms: 450,
+            palm_keyboard: true,
+            rest_zone_mm: 0.0,
+            rest_zones: vec![],
+            dwt_ms: 300,
+            pen_pause: true,
+            accent: "#4a8be0".into(),
+            key_alpha: 100,
+            status_info: true,
+            sound_feedback: false,
+            haptic_feedback: false,
+            track_layout: true,
+            quick_actions: QuickCfg::default(),
+            features: Features::default(),
         }
     }
 }
 
-fn merge(base: &mut toml::Table, top: toml::Table) {
+/// deep merge: tables merge key by key, everything else is replaced
+pub fn merge(base: &mut toml::Table, top: toml::Table) {
     for (k, v) in top {
-        base.insert(k, v);
+        match (base.get_mut(&k), v) {
+            (Some(toml::Value::Table(b)), toml::Value::Table(t)) => merge(b, t),
+            (_, v) => {
+                base.insert(k, v);
+            }
+        }
+    }
+}
+
+/// the app-written settings overrides (the settings sheet), merged after config.toml
+pub fn settings_path(xdg_config: &Path) -> PathBuf {
+    xdg_config.join("dexhid/settings.toml")
+}
+
+/// read the settings overrides (missing = empty)
+pub fn load_settings(p: &Path) -> Result<toml::Table, String> {
+    match std::fs::read_to_string(p) {
+        Ok(s) => toml::from_str::<toml::Table>(&s).map_err(|e| format!("{}: {}", p.display(), e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Table::new()),
+        Err(e) => Err(format!("{}: {}", p.display(), e)),
+    }
+}
+
+/// atomic write of the settings overrides
+pub fn save_settings(p: &Path, t: &toml::Table) -> Result<(), String> {
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {}", d.display(), e))?;
+    }
+    let mut s = String::from("# DexHid settings written by the settings sheet / `dexhid set` (overrides config.toml)\n");
+    s.push_str(&toml::to_string(t).map_err(|e| e.to_string())?);
+    let tmp = p.with_extension("toml.tmp");
+    std::fs::write(&tmp, s).map_err(|e| format!("{}: {}", tmp.display(), e))?;
+    std::fs::rename(&tmp, p).map_err(|e| format!("{}: {}", p.display(), e))
+}
+
+/// merge the config files plus the settings overrides into a Config (the settings come before `--config`, which is
+/// last in `paths`, so a test config still wins)
+pub fn load_with(paths: &[PathBuf], settings: &toml::Table, settings_before_last: bool) -> (Config, Vec<String>) {
+    let mut t = toml::Table::new();
+    let mut notes = vec![];
+    let n = paths.len();
+    for (i, p) in paths.iter().enumerate() {
+        if settings_before_last && i + 1 == n {
+            merge(&mut t, settings.clone());
+        }
+        match std::fs::read_to_string(p) {
+            Ok(s) => match toml::from_str::<toml::Table>(&s) {
+                Ok(x) => {
+                    notes.push(format!("config file {}", p.display()));
+                    merge(&mut t, x)
+                }
+                Err(e) => notes.push(format!("ERROR config {}: {}", p.display(), e)),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => notes.push(format!("ERROR config {}: {}", p.display(), e)),
+        }
+    }
+    if !settings_before_last {
+        merge(&mut t, settings.clone());
+    }
+    match Config::deserialize(toml::Value::Table(t)) {
+        Ok(c) => (c, notes),
+        Err(e) => {
+            notes.push(format!("ERROR config (merged): {}; using the defaults", e));
+            (Config::default(), notes)
+        }
     }
 }
 
@@ -201,6 +402,31 @@ mod tests {
         s.monitors.insert("abc".into(), "pad".into());
         s.save(&p).unwrap();
         assert_eq!(Persist::load(&p), s);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn settings_overrides_deep_merge_and_order() {
+        let d = std::env::temp_dir().join(format!("dexhid-set-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let user = d.join("config.toml");
+        let test = d.join("test.toml");
+        std::fs::write(&user, "speed = 1.5\n[quick_actions]\nactions = [\"copy\"]\n").unwrap();
+        std::fs::write(&test, "autostart = \"on\"\n").unwrap();
+        let sp = settings_path(&d);
+        let mut s = toml::Table::new();
+        crate::settings::set(&mut s, "quick_actions.enabled", toml::Value::Boolean(false));
+        crate::settings::set(&mut s, "speed", toml::Value::Float(2.0));
+        crate::settings::set(&mut s, "autostart", toml::Value::String("off".into()));
+        save_settings(&sp, &s).unwrap();
+        let back = load_settings(&sp).unwrap();
+        assert_eq!(back, s);
+        let (c, notes) = load_with(&[user, test], &back, true);
+        assert!(notes.iter().all(|n| !n.starts_with("ERROR")), "{:?}", notes);
+        assert_eq!(c.speed, 2.0, "settings override config.toml");
+        assert!(!c.quick_actions.enabled);
+        assert_eq!(c.quick_actions.actions, vec!["copy"], "deep merge keeps the sibling key");
+        assert_eq!(c.autostart, "on", "--config (last) still wins over the settings");
         std::fs::remove_dir_all(&d).ok();
     }
 

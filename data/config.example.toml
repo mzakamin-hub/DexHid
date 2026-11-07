@@ -45,6 +45,60 @@ strip_mm = 11.0
 # Show a small "Use as pad" pill while the monitor is used as a plain display.
 display_pill = true
 
-# Planned (M2): offer the touchpad-only layout while a physical keyboard is attached.
+# Touchpad only (no on-screen keyboard) while a physical keyboard (BT / USB / cover) is attached.
 pad_only_with_physical_keyboard = false
+
+# ---- M2: everything below is also in the settings sheet (Settings in the top bar). The sheet and `dexhid set`
+# write their changes to ~/.config/dexhid/settings.toml, which overrides this file.
+# "touchpad" (the desktop's touchpad driver) or "mouse" (DexHid's own relative-mouse recognizer).
+mode = "touchpad"
+# Applied to the virtual touchpad through the desktop (KWin InputDevice); other desktops: their own settings.
+natural_scroll = false
+tap_to_click = true
+pointer_accel = 0.0
+# Right click: "zones+tap" (click zones + two-finger tap), "tap", "zones".
+right_click = "zones+tap"
+# Dim the tablet panel while it is a touchpad (restored on release and by `dexhid --restore`).
+dim = true
+dim_percent = 20
+backlight = "auto"
+# Keyboard: sticky modifiers, long press for alternates (layout `long = ...`), key click sound.
+sticky_modifiers = false
+long_press_ms = 450
+sound_feedback = false
+haptic_feedback = false
+track_layout = true
+# Palm rejection: palm_major above (0 = off) also on the keys; rest zones at the panel edges (mm) and as
+# [x, y, w, h] fractions of the area below the bar; pad touches ignored right after a key press; pen near = pause.
+palm_keyboard = true
+rest_zone_mm = 0.0
+rest_zones = []
+dwt_ms = 300
+pen_pause = true
+# Look: "dark", "light", "amoled", "auto" (follow the desktop); accent colour; key opacity %; status text in the bar.
 theme = "dark"
+accent = "#4a8be0"
+key_alpha = 100
+status_info = true
+
+# Quick actions: which buttons show, in order ("id" or "id:2" for a double-size button). Built-in ids: copy paste
+# cut undo redo select_all find save alt_tab show_desktop overview close_window other_screen fullscreen screenshot
+# vol_down vol_up mute play_pause next prev mon_bright_up mon_bright_down (ddcutil) emoji (plasma-emojier).
+[quick_actions]
+enabled = true
+actions = ["copy", "paste", "undo", "redo", "alt_tab", "show_desktop", "screenshot", "vol_down", "vol_up", "play_pause"]
+# custom actions: a key chord or a command (argv list, never a shell)
+# [[quick_actions.custom]]
+# id = "newtab"
+# label = "New tab"
+# keys = "LEFTCTRL+T"
+# [[quick_actions.custom]]
+# id = "term"
+# label = "Terminal"
+# command = ["konsole"]
+
+# Planned feature modules (stored now, acted on from M3): gestures, clipboard, textedit, remote, pen, suggest,
+# profiles, mirror, wireless. Example:
+# [features.gestures]
+# enabled = true
+# options = { three_swipe = "desktop", four_swipe = "overview", three_tap = "middle-click" }

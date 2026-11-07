@@ -2,6 +2,10 @@
 //! DexHid core: everything that can be tested without devices, a compositor or a bus.
 //! Written from scratch for DexHid; behaviour numbers cited from Denial's INPUT_DECK.md, no Denial code used.
 
+pub mod settings;
+pub mod quick;
+pub mod mouse;
+pub mod feedback;
 pub mod arrangement;
 pub mod chord;
 pub mod config;

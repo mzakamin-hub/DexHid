@@ -16,6 +16,13 @@
     <method name="Status"><arg type="s" direction="out"/></method>
     <!-- keyboard layout by name (full, tablet, split, none, or a user layout file) -->
     <method name="SetLayout"><arg name="name" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <!-- M2: change a setting of the settings registry (key, value; an empty value steps it like a tap in the
+         settings sheet); returns the new value, InvalidArgs for an unknown key or a bad value -->
+    <method name="SetSetting"><arg name="key" type="s" direction="in"/><arg name="value" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <!-- M2: every setting as JSON {key: value} -->
+    <method name="GetSettings"><arg type="s" direction="out"/></method>
+    <!-- M2: run a quick action by id (as if its button was tapped) -->
+    <method name="RunQuick"><arg name="id" type="s" direction="in"/><arg type="s" direction="out"/></method>
     <!-- tests without a monitor: only when the daemon runs with --debug, AccessDenied otherwise -->
     <method name="DebugConnector"><arg name="connected" type="b" direction="in"/><arg type="s" direction="out"/></method>
     <!-- desired state: idle, offer, pad, display, hidden -->

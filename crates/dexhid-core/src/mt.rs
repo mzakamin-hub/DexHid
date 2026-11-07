@@ -149,6 +149,26 @@ impl Mt {
             s.id = None;
         }
     }
+
+    /// Full resync at grab time (M2 fix): tracking ids, the last positions / touch major of every slot and the
+    /// current slot (EVIOCGMTSLOTS + EVIOCGABS(ABS_MT_SLOT)). The kernel drops ABS values equal to the stored
+    /// ones, so a new contact at the exact spot of the previous one carries no position at all: without the
+    /// stored positions it would land at (0, 0) (M1 T10: a second Shift press after a restart did nothing).
+    pub fn sync_full(&mut self, tids: &[i32], xs: &[i32], ys: &[i32], majors: &[i32], cur: i32) {
+        self.sync_tids(tids);
+        for (i, s) in self.slots.iter_mut().enumerate() {
+            if let Some(&x) = xs.get(i) {
+                s.x = x;
+            }
+            if let Some(&y) = ys.get(i) {
+                s.y = y;
+            }
+            if let Some(&m) = majors.get(i) {
+                s.major = m;
+            }
+        }
+        self.cur = (cur.max(0) as usize).min(self.slots.len() - 1);
+    }
 }
 
 #[cfg(test)]
@@ -200,6 +220,23 @@ mod tests {
         ev(&mut m, &[(EV_ABS, ABS_MT_TRACKING_ID, -1), (EV_SYN, SYN_REPORT, 0)]);
         let r = ev(&mut m, &[(EV_ABS, ABS_MT_TRACKING_ID, 5), (EV_SYN, SYN_REPORT, 0)]);
         assert!(matches!(r[0], Contact::Down { .. }));
+    }
+
+    #[test]
+    fn sync_full_keeps_positions_for_deduplicated_events() {
+        // M1 T10 root cause: daemon B started after the replay device's slot 0 last touched (5000, 9000). The next
+        // press at the same spot only carries a tracking id (the kernel drops equal ABS values), and slot 1 was the
+        // current slot (no ABS_MT_SLOT event either when it does not change).
+        let mut m = Mt::new(3);
+        m.sync_full(&[-1, -1, -1], &[5000, 7, 0], &[9000, 8, 0], &[20, 0, 0], 1);
+        let r = ev(&mut m, &[(EV_ABS, ABS_MT_TRACKING_ID, 33), (EV_SYN, SYN_REPORT, 0)]);
+        assert_eq!(r, vec![Contact::Down { id: 1, x: 7, y: 8, major: 0 }]);
+        let r = ev(&mut m, &[(EV_ABS, ABS_MT_SLOT, 0), (EV_ABS, ABS_MT_TRACKING_ID, 34), (EV_SYN, SYN_REPORT, 0)]);
+        assert_eq!(r, vec![Contact::Down { id: 2, x: 5000, y: 9000, major: 20 }]);
+        // the old behaviour (fresh Mt, no sync) put that contact at (0, 0)
+        let mut old = Mt::new(3);
+        let r = ev(&mut old, &[(EV_ABS, ABS_MT_TRACKING_ID, 34), (EV_SYN, SYN_REPORT, 0)]);
+        assert_eq!(r, vec![Contact::Down { id: 1, x: 0, y: 0, major: 0 }]);
     }
 
     #[test]

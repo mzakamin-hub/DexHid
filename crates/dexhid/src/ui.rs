@@ -9,6 +9,7 @@
 //! Also reports the outputs (for the "monitor really enabled" check), the geometry and the xkb legends.
 
 use crate::render::{self, Canvas, Fonts};
+use dexhid_core::feedback::{self, Palette};
 use crate::shared::{Cmd, SharedRef};
 use crate::sys::*;
 use dexhid_core::geom::{Geometry, Rect, Transform};
@@ -358,7 +359,24 @@ impl Hit {
 
 // ------------------------------------------------------------------ drawing
 
-fn key_label(k: &PlacedKey, shift: bool, labels: Option<&crate::xkb::Labels>) -> String {
+/// legend of one evdev code (xkb symbol keys follow the desktop layout, the rest the US table)
+fn code_label(c: u16, shift: bool, labels: Option<&crate::xkb::Labels>) -> String {
+    if keycodes::is_symbol_key(c) {
+        if let Some((a, b)) = labels.and_then(|l| l.map.get(&c)) {
+            return if shift && !b.is_empty() { b.clone() } else { a.clone() };
+        }
+    }
+    let (a, b) = keycodes::us_legend(c);
+    if shift && !b.is_empty() {
+        b.to_string()
+    } else {
+        a.to_string()
+    }
+}
+
+fn key_label(k: &PlacedKey, m: &UiModel, labels: Option<&crate::xkb::Labels>) -> String {
+    let caps = m.leds.0;
+    let shift = m.shift;
     if shift {
         if let Some(s) = &k.shift_label {
             return s.clone();
@@ -369,113 +387,191 @@ fn key_label(k: &PlacedKey, shift: bool, labels: Option<&crate::xkb::Labels>) ->
     }
     match &k.kind {
         KeyKind::Code(c) => {
-            if keycodes::is_symbol_key(*c) {
-                if let Some((a, b)) = labels.and_then(|l| l.map.get(c)) {
-                    return if shift && !b.is_empty() { b.clone() } else { a.clone() };
-                }
+            let c2 = if m.fn_on { keycodes::fn_map(*c) } else { *c };
+            // Caps Lock: letters show upper case (xor Shift)
+            let letter = matches!(c2, 16..=25 | 30..=38 | 44..=50);
+            code_label(c2, if letter { shift ^ caps } else { shift }, labels)
+        }
+        KeyKind::Combo(v) => {
+            // Shift+key: the shifted legend of the key in the desktop layout; other chords: "Ctrl+C" style
+            let base = *v.last().unwrap_or(&0);
+            if v.len() == 2 && keycodes::is_shift(v[0]) {
+                return code_label(base, true, labels);
             }
-            let (a, b) = keycodes::us_legend(*c);
-            if shift && !b.is_empty() {
-                b.to_string()
-            } else {
-                a.to_string()
-            }
+            v.iter().map(|&c| if keycodes::is_modifier(c) { code_label(c, false, None) } else { code_label(c, false, labels).to_uppercase() }).collect::<Vec<_>>().join("+")
         }
         KeyKind::Action(Action::Page(p)) => p.clone(),
         KeyKind::Action(Action::LayoutNext) => "Layout".into(),
         KeyKind::Action(Action::KeyboardHide) => "Hide".into(),
+        KeyKind::Action(Action::Fn) => "Fn".into(),
         KeyKind::Gap => String::new(),
     }
 }
 
-fn draw_key(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, k: &PlacedKey, lit: bool, labels: Option<&crate::xkb::Labels>) {
-    let sym = matches!(k.kind, KeyKind::Code(c) if keycodes::is_symbol_key(c) || c == 57);
-    let col = if lit { render::KEY_LIT } else if sym { render::KEY } else { render::KEY_MOD };
-    let rad = m.px_per_mm * 1.2;
-    cv.round_rect(&k.rect, rad, col);
-    let l = key_label(k, m.shift, labels);
-    let size = (k.rect.h * 0.42).min(m.px_per_mm * 5.0);
-    let size = if l.chars().count() > 2 { size * 0.72 } else { size };
-    f.draw_centered(cv, &k.rect.inset(1.0), &l, size, if sym || lit { render::TEXT } else { render::TEXT_DIM });
+fn pal(m: &UiModel) -> Palette {
+    let (t, a, k) = &m.theme;
+    feedback::palette(if t.is_empty() { "dark" } else { t }, a, if *k == 0 { 100 } else { *k })
 }
 
-fn draw_button(cv: &mut Canvas, f: &mut Fonts, ppm: f32, r: &Rect, label: &str, lit: bool) {
-    cv.round_rect(r, ppm * 1.5, if lit { render::BTN_LIT } else { render::BTN });
-    f.draw_centered(cv, r, label, (r.h * 0.42).min(ppm * 4.0), render::TEXT);
+fn draw_key(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, p: &Palette, k: &PlacedKey, lit: bool, labels: Option<&crate::xkb::Labels>) {
+    let sym = matches!(k.kind, KeyKind::Code(c) if keycodes::is_symbol_key(c) || c == 57) || matches!(k.kind, KeyKind::Combo(_));
+    // latched sticky modifiers, Caps / Num Lock on, Fn layer: drawn in the accent colour
+    let on = match &k.kind {
+        KeyKind::Code(c) => m.latched.iter().any(|(l, _)| l == c) || (*c == 58 && m.leds.0) || (*c == 69 && m.leds.1),
+        KeyKind::Action(Action::Fn) => m.fn_on,
+        _ => false,
+    };
+    let col = if lit { p.accent } else if sym { p.key } else { p.key_mod };
+    let rad = m.px_per_mm * 1.2;
+    cv.round_rect(&k.rect, rad, col);
+    if on && !lit {
+        cv.outline(&k.rect.inset(m.px_per_mm * 0.3), m.px_per_mm * 0.6, p.accent);
+        let locked = matches!(&k.kind, KeyKind::Code(c) if m.latched.iter().any(|(l, lk)| l == c && *lk));
+        if locked || matches!(&k.kind, KeyKind::Code(58 | 69)) {
+            cv.circle(k.rect.right() - m.px_per_mm * 2.2, k.rect.y + m.px_per_mm * 2.2, m.px_per_mm * 0.9, p.accent);
+        }
+    }
+    let l = key_label(k, m, labels);
+    let size = (k.rect.h * 0.42).min(m.px_per_mm * 5.0);
+    let size = if l.chars().count() > 2 { size * 0.72 } else { size };
+    f.draw_centered(cv, &k.rect.inset(1.0), &l, size, if sym || lit { p.text } else { p.text_dim });
+    if let Some(alt) = &k.long {
+        let al = match alt {
+            KeyKind::Code(c) => code_label(*c, false, labels),
+            KeyKind::Combo(v) => code_label(*v.last().unwrap_or(&0), true, labels),
+            _ => String::new(),
+        };
+        let r = Rect::new(k.rect.right() - k.rect.w * 0.4, k.rect.y + 1.0, k.rect.w * 0.36, k.rect.h * 0.3);
+        f.draw_centered(cv, &r, &al, size * 0.45, p.text_dim);
+    }
+}
+
+fn draw_button(cv: &mut Canvas, f: &mut Fonts, ppm: f32, p: &Palette, r: &Rect, label: &str, lit: bool) {
+    cv.round_rect(r, ppm * 1.5, if lit { p.accent } else { p.btn });
+    f.draw_centered(cv, r, label, (r.h * 0.42).min(ppm * 4.0), p.text);
 }
 
 fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, labels: Option<&crate::xkb::Labels>) {
-    cv.clear(render::BG);
+    let p = pal(m);
+    cv.clear(p.bg);
     let ppm = m.px_per_mm;
-    cv.fill(&m.strip, render::STRIP);
+    cv.fill(&m.strip, p.strip);
     let tr = Rect::new(m.strip.x + ppm * 3.0, m.strip.y, ppm * 22.0, m.strip.h);
-    f.draw_left(cv, &tr, &m.title, m.strip.h * 0.4, render::TEXT);
+    f.draw_left(cv, &tr, &m.title, m.strip.h * 0.4, p.text);
     let first_btn = m.buttons.iter().filter(|b| m.strip.contains(b.rect.x, b.rect.y)).map(|b| b.rect.x).fold(m.strip.right(), f32::min);
-    let hw = (first_btn - tr.right() - ppm * 2.0).min(ppm * 90.0);
+    let hw = (first_btn - tr.right() - ppm * 2.0).min(ppm * 120.0);
     let hsize = m.strip.h * 0.28;
-    if hw > ppm * 10.0 && f.width(&m.hint, hsize * cv.scale) <= hw * cv.scale {
+    let mut line = if m.edit { m.hint.clone() } else if !m.notice.is_empty() { m.notice.clone() } else { m.hint.clone() };
+    if !m.edit && !m.info.is_empty() {
+        line = format!("{}    {}", m.info, line);
+    }
+    if hw > ppm * 10.0 {
+        let mut s = line;
+        while !s.is_empty() && f.width(&s, hsize * cv.scale) > hw * cv.scale {
+            s.pop();
+        }
         let hr = Rect::new(tr.right(), m.strip.y, hw, m.strip.h);
-        f.draw_left(cv, &hr, &m.hint, hsize, if m.edit { render::EDIT } else { render::TEXT_DIM });
+        f.draw_left(cv, &hr, &s, hsize, if m.edit { p.edit } else if !m.notice.is_empty() { p.accent } else { p.text_dim });
     }
     for r in &m.regions {
         if r.id == dexhid_core::arrangement::TOUCHPAD {
-            cv.round_rect(&r.rect, ppm * 2.5, render::PAD_EDGE);
-            cv.round_rect(&r.rect.inset(ppm * 0.4), ppm * 2.2, render::PAD);
+            cv.round_rect(&r.rect, ppm * 2.5, p.pad_edge);
+            cv.round_rect(&r.rect.inset(ppm * 0.4), ppm * 2.2, p.pad);
+        }
+        if r.id == dexhid_core::arrangement::QUICK {
+            cv.round_rect(&r.rect, ppm * 2.0, p.zone);
         }
     }
     if let Some((l, r)) = &m.zones {
-        cv.fill(&l.inset(ppm * 0.6), render::ZONE);
-        cv.fill(&r.inset(ppm * 0.6), render::ZONE);
-        cv.fill(&Rect::new(r.x - ppm * 0.15, r.y + ppm, ppm * 0.3, r.h - 2.0 * ppm), render::PAD_EDGE);
-        f.draw_centered(cv, l, "left click", ppm * 3.0, render::TEXT_DIM);
-        f.draw_centered(cv, r, "right click", ppm * 3.0, render::TEXT_DIM);
+        cv.fill(&l.inset(ppm * 0.6), p.zone);
+        cv.fill(&r.inset(ppm * 0.6), p.zone);
+        cv.fill(&Rect::new(r.x - ppm * 0.15, r.y + ppm, ppm * 0.3, r.h - 2.0 * ppm), p.pad_edge);
+        f.draw_centered(cv, l, "left click", ppm * 3.0, p.text_dim);
+        f.draw_centered(cv, r, "right click", ppm * 3.0, p.text_dim);
+    }
+    for q in &m.quick {
+        draw_button(cv, f, ppm, &p, &q.rect, &q.label, false);
     }
     for k in &m.keys {
-        draw_key(cv, f, m, k, false, labels);
+        draw_key(cv, f, m, &p, k, false, labels);
     }
     if m.edit {
         for r in &m.regions {
-            cv.outline(&r.rect, ppm * 0.7, render::EDIT);
+            cv.outline(&r.rect, ppm * 0.7, p.edit);
             let hs = ppm * 6.0;
             for (x, y) in [(r.rect.x, r.rect.y), (r.rect.right() - hs, r.rect.y), (r.rect.x, r.rect.bottom() - hs), (r.rect.right() - hs, r.rect.bottom() - hs)] {
-                cv.fill(&Rect::new(x, y, hs, hs), render::EDIT);
+                cv.fill(&Rect::new(x, y, hs, hs), p.edit);
             }
+            // edge handles (M2): short bars in the middle of each side
+            let (bl, bt) = ((r.rect.w * 0.18).min(ppm * 16.0), ppm * 1.6);
+            let (cx, cy) = r.rect.center();
+            cv.round_rect(&Rect::new(cx - bl / 2.0, r.rect.y, bl, bt), bt / 2.0, p.edit);
+            cv.round_rect(&Rect::new(cx - bl / 2.0, r.rect.bottom() - bt, bl, bt), bt / 2.0, p.edit);
+            let bl2 = (r.rect.h * 0.18).min(ppm * 16.0);
+            cv.round_rect(&Rect::new(r.rect.x, cy - bl2 / 2.0, bt, bl2), bt / 2.0, p.edit);
+            cv.round_rect(&Rect::new(r.rect.right() - bt, cy - bl2 / 2.0, bt, bl2), bt / 2.0, p.edit);
             let c = Rect::new(r.rect.x, r.rect.y + r.rect.h / 2.0 - ppm * 5.0, r.rect.w, ppm * 10.0);
             cv.round_rect(&c.inset(ppm), ppm, 0xc0101318);
-            f.draw_centered(cv, &c, &r.id.replace('_', " "), ppm * 5.0, render::EDIT);
+            f.draw_centered(cv, &c, &r.id.replace('_', " "), ppm * 5.0, p.edit);
+        }
+        // snap guides while dragging
+        for g in &m.guides {
+            let w = ppm * 0.35;
+            let r = if g.vertical { Rect::new(g.pos - w / 2.0, g.from, w, g.to - g.from) } else { Rect::new(g.from, g.pos - w / 2.0, g.to - g.from, w) };
+            cv.fill(&r, p.accent);
         }
     }
-    if let Some(p) = &m.panel {
-        cv.round_rect(p, ppm * 3.0, 0xf8222a35);
-        let t = Rect::new(p.x, p.y + ppm * 2.0, p.w, ppm * 10.0);
-        f.draw_centered(cv, &t, &m.panel_title, ppm * 4.5, render::TEXT);
+    if let Some(s) = &m.sheet {
+        cv.round_rect(&s.rect, ppm * 3.0, p.card);
+        if let Some(b) = m.buttons.iter().find(|b| matches!(b.btn, Btn::SheetTab(_))) {
+            let tabs = Rect::new(b.rect.x - ppm, s.rect.y + ppm, b.rect.w + 2.0 * ppm, s.rect.h - 2.0 * ppm);
+            cv.round_rect(&tabs, ppm * 2.0, p.strip);
+        }
+        let x0 = s.rows.first().map(|r| r.rect.x).unwrap_or(s.rect.x + ppm * 60.0);
+        let tr = Rect::new(x0, s.rect.y + ppm * 2.0, s.rect.right() - x0 - ppm * 2.0, ppm * 8.0);
+        f.draw_left(cv, &tr, &s.title, ppm * 4.5, p.text);
+        if !s.subtitle.is_empty() {
+            let sr = Rect::new(x0, tr.bottom() - ppm * 1.5, tr.w, ppm * 5.0);
+            f.draw_left(cv, &sr, &s.subtitle, ppm * 2.8, p.edit);
+        }
+        for r in &s.rows {
+            cv.fill(&Rect::new(r.rect.x, r.rect.bottom(), r.rect.w, ppm * 0.15), p.pad_edge);
+            let lr = Rect::new(r.rect.x + ppm, r.rect.y, r.rect.w * 0.55, r.rect.h);
+            f.draw_left(cv, &lr, &r.title, ppm * 3.4, if r.live { p.text } else { p.text_dim });
+        }
     }
     for b in &m.buttons {
-        draw_button(cv, f, ppm, &b.rect, &b.label, false);
+        let sel = matches!(b.btn, Btn::SheetTab(i) if m.sheet.as_ref().is_some_and(|s| s.tab == i as usize));
+        draw_button(cv, f, ppm, &p, &b.rect, &b.label, sel);
     }
 }
 
 /// dynamic layer: pressed keys, pressed button, touch dots. Returns the buffer rects touched.
 fn draw_dynamic(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, labels: Option<&crate::xkb::Labels>) -> Vec<(i32, i32, i32, i32)> {
+    let p = pal(m);
     let mut d = vec![];
     for &i in &m.lit_keys {
         if let Some(k) = m.keys.get(i) {
-            draw_key(cv, f, m, k, true, labels);
+            draw_key(cv, f, m, &p, k, true, labels);
             d.push(cv.damage_of(&k.rect));
         }
     }
     if let Some(b) = m.lit_button.and_then(|b| m.buttons.iter().find(|v| v.btn == b)) {
-        draw_button(cv, f, m.px_per_mm, &b.rect, &b.label, true);
+        draw_button(cv, f, m.px_per_mm, &p, &b.rect, &b.label, true);
         d.push(cv.damage_of(&b.rect));
     }
+    if let Some(q) = m.lit_quick.and_then(|i| m.quick.get(i)) {
+        draw_button(cv, f, m.px_per_mm, &p, &q.rect, &q.label, true);
+        d.push(cv.damage_of(&q.rect));
+    }
     let r = m.px_per_mm * 4.0;
+    let dot = (p.accent & 0x00ff_ffff) | 0xc000_0000;
     for &(x, y) in &m.dots {
-        cv.circle(x, y, r, render::DOT);
+        cv.circle(x, y, r, dot);
         d.push(cv.damage_of(&Rect::new(x - r, y - r, 2.0 * r, 2.0 * r)));
     }
     d
 }
-
 fn prompt_layout(w: f32, h: f32, ppm: f32) -> (Rect, Vec<(Rect, Hit, &'static str)>) {
     let cw = (150.0 * ppm).min(w * 0.94);
     let ch = (78.0 * ppm).min(h * 0.9);
@@ -560,6 +656,8 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
     println!("UI-FONT path={} ok={}", fonts.path, fonts.ok());
     let mut labels: Option<crate::xkb::Labels> = None;
     let mut labels_gen: u64 = 1;
+    let mut last_keymap: Option<String> = None;
+    let mut cur_group = sh.xkb_group.load(Ordering::SeqCst);
     let mut surf: Option<Surf> = None;
     let mut want = (UiKind::None, UiModel::default());
     let mut seen_ver = u64::MAX;
@@ -586,15 +684,20 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
             let names: Vec<String> = st.outputs.iter().map(|o| o.name.clone()).filter(|n| !n.is_empty()).collect();
             sh.send(Cmd::Outputs(names));
         }
-        // keymap -> legends
-        if let Some(km) = st.keymap.take() {
-            match crate::xkb::labels(&km, cfg.xkb_layout_index, &codes) {
+        // keymap / active group (KDE layout tracker) -> legends
+        let grp = sh.xkb_group.load(Ordering::SeqCst);
+        if st.keymap.is_some() || (grp != cur_group && last_keymap.is_some()) {
+            if let Some(km) = st.keymap.take() {
+                last_keymap = Some(km);
+            }
+            cur_group = grp;
+            match crate::xkb::labels(last_keymap.as_deref().unwrap_or(""), grp, &codes) {
                 Ok(l) => {
-                    println!("XKB layouts={} group={} names={:?} labelled={}", l.layouts.len(), l.group, l.layouts, l.map.len());
+                    println!("XKB layouts={} group={} names={:?} labelled={} sample={}", l.layouts.len(), l.group, l.layouts, l.map.len(), [16u16, 17, 21, 44].iter().map(|c| l.map.get(c).map(|x| x.0.clone()).unwrap_or_default()).collect::<String>());
                     sh.send(Cmd::Labels(l.map.len()));
                     labels = Some(l);
                 }
-                Err(e) => println!("XKB {} (TODO: legends stay US)", e),
+                Err(e) => println!("XKB {} (legends stay US)", e),
             }
             labels_gen += 1;
             need_draw = true;
@@ -915,14 +1018,73 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
         tmax: (33919, 23999),
     };
     let mut cfg = RouterCfg::default();
+    let _ = &mut cfg;
     if let Some(o) = a.val("--options") {
         cfg.options = o.split(',').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
     }
+    if a.flag("--quick") {
+        cfg.quick = true;
+    }
     let mut r = Router::new(cfg, l);
+    if a.flag("--quick") {
+        let q = dexhid_core::config::QuickCfg::default();
+        let (items, _) = dexhid_core::quick::resolve(&q, &|_| true);
+        r.set_quick(items.iter().map(|i| (i.id.clone(), i.label.clone(), if i.id == "paste" { 2 } else { i.size })).collect());
+    }
+    if let Some(t) = a.val("--theme") {
+        r.set_theme(&t, &a.val("--accent").unwrap_or_else(|| "#4a8be0".into()), a.val("--key-alpha").and_then(|v| v.parse().ok()).unwrap_or(100));
+    }
+    r.set_info("84 % charging  |  DP-1");
     r.set_geometry(g);
+    if a.flag("--edit") || a.flag("--guides") {
+        // long press on the strip -> edit mode (as a user would)
+        use dexhid_core::mt::Contact;
+        let s = r.model().strip;
+        let (x, y) = g.logical_to_touch(s.x + s.w * 0.3, s.y + s.h / 2.0);
+        r.contact(Contact::Down { id: 900, x, y, major: 10 }, 0);
+        r.tick(700);
+        r.contact(Contact::Up { id: 900 }, 800);
+        if a.flag("--guides") {
+            let tp = r.model().regions.iter().find(|x| x.id == "touchpad").map(|x| x.rect).unwrap();
+            let kb = r.model().regions.iter().find(|x| x.id != "touchpad").map(|x| x.rect).unwrap();
+            let (x, y) = g.logical_to_touch(tp.x + tp.w / 2.0, tp.y + 2.0);
+            r.contact(Contact::Down { id: 901, x, y, major: 10 }, 1000);
+            let (x2, y2) = g.logical_to_touch(tp.x + tp.w / 2.0, kb.bottom() + 4.0);
+            r.contact(Contact::Move { id: 901, x: x2, y: y2, major: 10 }, 1100);
+        }
+    }
+    if let Some(md) = a.val("--sheet") {
+        let c = dexhid_core::config::Config::default();
+        let v = toml::Value::try_from(&c).unwrap();
+        let mut mods: Vec<dexhid_core::router::SheetModule> = dexhid_core::settings::MODULES
+            .iter()
+            .map(|m| dexhid_core::router::SheetModule { id: m.id.into(), title: m.title.into(), live: m.implemented, plan: m.plan.into(), rows: dexhid_core::settings::rows(m.id, &v, &Default::default()) })
+            .collect();
+        if let Some(q) = mods.iter_mut().find(|m| m.id == "quick") {
+            for (id, label) in dexhid_core::quick::all_ids(&c.quick_actions) {
+                let s = dexhid_core::quick::size_of(&c.quick_actions, &id);
+                q.rows.push(dexhid_core::settings::Row { key: format!("quick:{}", id), title: label, value: if s == 0 { "off".into() } else { "on".into() }, kind: dexhid_core::settings::Kind::Choice(&["off", "on", "large"]), live: true });
+            }
+        }
+        r.set_sheet(mods);
+        use dexhid_core::mt::Contact;
+        let b = r.model().buttons.iter().find(|b| b.name == "strip.settings").map(|b| b.rect).unwrap();
+        let (x, y) = g.logical_to_touch(b.x + b.w / 2.0, b.y + b.h / 2.0);
+        r.contact(Contact::Down { id: 910, x, y, major: 10 }, 5000);
+        r.contact(Contact::Up { id: 910 }, 5030);
+        if let Some(t) = r.model().buttons.iter().find(|b| b.name == format!("sheet.tab.{}", md)).map(|b| b.rect) {
+            let (x, y) = g.logical_to_touch(t.x + t.w / 2.0, t.y + t.h / 2.0);
+            r.contact(Contact::Down { id: 911, x, y, major: 10 }, 5100);
+            r.contact(Contact::Up { id: 911 }, 5130);
+        }
+    }
     let mut m = r.model().clone();
-    m.edit = a.flag("--edit");
     m.shift = a.flag("--shift");
+    m.fn_on = a.flag("--fn");
+    if a.flag("--caps") {
+        m.leds = (true, false);
+        m.latched = vec![(29, false)];
+    }
     if a.flag("--press") {
         m.lit_keys = (0..m.keys.len()).step_by(7).collect();
         m.dots = vec![(m.w * 0.5, m.h * 0.8)];

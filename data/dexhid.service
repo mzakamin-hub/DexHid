@@ -12,8 +12,12 @@ Requisite=graphical-session.target
 Type=notify
 NotifyAccess=main
 ExecStart=/usr/bin/dexhid daemon
-# M2: restores the panel brightness if dexhid died while dimming (a no-op in M1)
+# restores the panel brightness if dexhid died while dimming
 ExecStopPost=/usr/bin/dexhid --restore
+# M2: the key guardian (a child process that owns the virtual keyboard) must survive a watchdog SIGKILL of the
+# daemon so it can send the key-ups before the keyboard goes; mixed = SIGTERM / watchdog signal to the daemon only,
+# the final SIGKILL to everything left
+KillMode=mixed
 # hang: no WATCHDOG=1 for 5 s -> SIGABRT, then SIGKILL after 3 s (also kills a stopped process);
 # the kernel releases the grab and the virtual devices either way
 WatchdogSec=5

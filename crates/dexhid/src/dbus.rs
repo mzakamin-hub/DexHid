@@ -40,6 +40,28 @@ impl Api {
         self.sh.send(Cmd::SetLayout(name.to_string()));
         Ok("ok".into())
     }
+    /// M2: change a setting (key from the settings registry, e.g. "natural_scroll", "speed", "quick:copy");
+    /// an empty value steps it like a tap in the settings sheet. Returns the new value.
+    fn set_setting(&self, key: &str, value: &str) -> zbus::fdo::Result<String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.sh.send(Cmd::SetSetting(key.to_string(), value.to_string(), tx));
+        match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(zbus::fdo::Error::InvalidArgs(e)),
+            Err(_) => Err(zbus::fdo::Error::Failed("daemon did not answer".into())),
+        }
+    }
+    /// M2: all settings as JSON {key: value}
+    fn get_settings(&self) -> zbus::fdo::Result<String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.sh.send(Cmd::GetSettings(tx));
+        rx.recv_timeout(std::time::Duration::from_secs(3)).map_err(|_| zbus::fdo::Error::Failed("daemon did not answer".into()))
+    }
+    /// M2: run a quick action by id (as if its button was tapped)
+    fn run_quick(&self, id: &str) -> String {
+        self.sh.send(Cmd::RunQuick(id.to_string()));
+        "ok".into()
+    }
     /// debug builds / `--debug` only: act as if an external display was (dis)connected (tests without a monitor)
     fn debug_connector(&self, connected: bool) -> zbus::fdo::Result<String> {
         if !self.sh.debug {
@@ -76,6 +98,10 @@ pub fn call(method: &str, arg: Option<&str>) -> Result<String, String> {
     let c = zbus::blocking::Connection::session().map_err(|e| format!("session bus: {}", e))?;
     let r = match (method, arg) {
         ("DebugConnector", Some(a)) => c.call_method(Some(NAME), PATH, Some(NAME), method, &(a == "connect",)),
+        ("SetSetting", Some(a)) => {
+            let (k, v) = a.split_once('\u{1f}').unwrap_or((a, ""));
+            c.call_method(Some(NAME), PATH, Some(NAME), method, &(k, v))
+        }
         (_, Some(a)) => c.call_method(Some(NAME), PATH, Some(NAME), method, &(a,)),
         (_, None) => c.call_method(Some(NAME), PATH, Some(NAME), method, &()),
     }

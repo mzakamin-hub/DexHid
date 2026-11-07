@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# DexHid layout (M2): numeric keypad / calculator. Big keypad keys plus calculator helpers; with the touchpad next
+# to it. The "Calc" key is a chord of the desktop's calculator shortcut (KDE: none by default: use a quick action
+# with a command instead).
+name = "numpad"
+title = "Numpad / calculator"
+description = "Numeric keypad with operators, Backspace, Tab, Esc and arrows"
+
+[[part]]
+region = "keyboard"
+
+[[part.page]]
+id = "main"
+
+[[part.page.row]]
+height = 0.8
+keys = [ { key = "ESC" }, { key = "TAB" }, { key = "BACKSPACE", label = "⌫" }, { key = "DELETE" }, { key = "LEFTSHIFT+5", label = "%" } ]
+
+[[part.page.row]]
+keys = [ { key = "NUMLOCK" }, { key = "KPSLASH" }, { key = "KPASTERISK" }, { key = "KPMINUS" }, { key = "LEFTSHIFT+9", label = "(" } ]
+
+[[part.page.row]]
+keys = [ { key = "KP7" }, { key = "KP8" }, { key = "KP9" }, { key = "KPPLUS" }, { key = "LEFTSHIFT+0", label = ")" } ]
+
+[[part.page.row]]
+keys = [ { key = "KP4" }, { key = "KP5" }, { key = "KP6" }, { key = "KPEQUAL" }, { key = "UP" } ]
+
+[[part.page.row]]
+keys = [ { key = "KP1" }, { key = "KP2" }, { key = "KP3" }, { key = "KPENTER" }, { key = "DOWN" } ]
+
+[[part.page.row]]
+keys = [ { key = "KP0", w = 2 }, { key = "KPDOT" }, { key = "LEFT" }, { key = "RIGHT" } ]

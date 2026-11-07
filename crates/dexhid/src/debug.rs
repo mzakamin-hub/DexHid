@@ -7,7 +7,7 @@
 //!   volsim --fifo F [--keys K1+K2] [--secs S]
 //!                                          virtual volume keys (the daemon grabs it via --chord-test-dev)
 //! FIFO commands (one per line, several per line with ';'), coordinates in native touch units:
-//!   tap X Y [MS] | hold X Y MS | drag X0 Y0 X1 Y1 MS | press S X Y | moveto S X Y | release S
+//!   tap X Y [MS] | hold X Y MS | drag X0 Y0 X1 Y1 MS | press S X Y | pressm S X Y MAJOR | moveto S X Y | release S
 //!   multi N X Y DX MS (N fingers DX apart, held MS) | down CODE.. | up CODE.. (volsim) | sleep MS | mark ID | quit
 
 use crate::devices::{create_replay_ts, Ts};
@@ -249,6 +249,15 @@ fn replay(a: &Args) -> i32 {
                 r.release(0);
             }
             "press" => r.press(p(w, 1).max(0) as usize, p(w, 2), p(w, 3)),
+            // pressm S X Y MAJOR: a contact with this touch major (palm replay)
+            "pressm" => {
+                let s = p(w, 1).max(0) as usize;
+                if s < r.down.len() {
+                    r.ts.down_major(s as i32, p(w, 2), p(w, 3), p(w, 4));
+                    r.down[s] = Some((p(w, 2), p(w, 3)));
+                    r.frame();
+                }
+            }
             "moveto" => r.moveto(p(w, 1).max(0) as usize, p(w, 2), p(w, 3)),
             "release" => r.release(p(w, 1).max(0) as usize),
             "multi" => {
@@ -276,14 +285,17 @@ fn volsim(a: &Args) -> i32 {
         return 1;
     };
     let keys: Vec<u16> = a.val("--keys").unwrap_or_else(|| "KEY_VOLUMEUP+KEY_VOLUMEDOWN".into()).split('+').filter_map(dexhid_core::keycodes::code).collect();
-    let u = match Uinput::create(&UinputSpec { name: "dexhid-volsim", keys: keys.clone(), abs: vec![], props: vec![] }) {
+    // M2: --name / --bus bluetooth make it a stand-in for a pen (keys 320 = BTN_TOOL_PEN) or a BT keyboard
+    let name = a.val("--name").unwrap_or_else(|| "dexhid-volsim".into());
+    let bus = if a.val("--bus").as_deref() == Some("bluetooth") { BUS_BLUETOOTH } else { 0 };
+    let u = match Uinput::create(&UinputSpec { keys: keys.clone(), bus, ..UinputSpec::new(&name) }) {
         Ok(u) => u,
         Err(e) => {
             println!("FAIL volsim: {}", e);
             return 1;
         }
     };
-    println!("NODE {} name=\"dexhid-volsim\" t={}", u.node, mono_ms());
+    println!("NODE {} name=\"{}\" t={}", u.node, name, mono_ms());
     let fd = match open_fifo(&fifo) {
         Ok(fd) => fd,
         Err(e) => {

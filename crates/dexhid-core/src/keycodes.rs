@@ -183,6 +183,30 @@ pub fn is_symbol_key(code: u16) -> bool {
     matches!(code, 2..=13 | 16..=27 | 30..=41 | 43..=53 | 86)
 }
 
+/// The Fn layer (M2): number row -> F1-F12, F-row -> media / volume / brightness, arrows -> Home / End / PgUp /
+/// PgDn, Backspace -> Delete. Other keys stay themselves.
+pub fn fn_map(code: u16) -> u16 {
+    match code {
+        2..=11 => code - 2 + 59,  // 1..0 -> F1..F10
+        12 => 87,                 // - -> F11
+        13 => 88,                 // = -> F12
+        59 => 113,                // F1 -> Mute
+        60 => 114,                // F2 -> Vol-
+        61 => 115,                // F3 -> Vol+
+        63 => 165,                // F5 -> Prev
+        64 => 164,                // F6 -> Play
+        65 => 163,                // F7 -> Next
+        87 => 224,                // F11 -> Brightness-
+        88 => 225,                // F12 -> Brightness+
+        103 => 104,               // Up -> PgUp
+        108 => 109,               // Down -> PgDn
+        105 => 102,               // Left -> Home
+        106 => 107,               // Right -> End
+        14 => 111,                // Backspace -> Delete
+        c => c,
+    }
+}
+
 /// every code the uinput keyboard announces
 pub fn all_codes() -> Vec<u16> {
     let mut v: Vec<u16> = TABLE.iter().map(|e| e.1).filter(|&c| c != 116).collect();

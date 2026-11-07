@@ -43,7 +43,7 @@ impl VirtualPad {
             (ABS_MT_POSITION_X, ai(0, xmax, res)),
             (ABS_MT_POSITION_Y, ai(0, ymax, res)),
         ];
-        let u = Uinput::create(&UinputSpec { name: PAD_NAME, keys, abs, props: vec![INPUT_PROP_POINTER] })?;
+        let u = Uinput::create(&UinputSpec { keys, abs, props: vec![INPUT_PROP_POINTER], ..UinputSpec::new(PAD_NAME) })?;
         Ok(VirtualPad { u, spec, cur: [None; SLOTS], ids: [-1; SLOTS], next_id: 1, tool: None, touch: false })
     }
 
@@ -125,14 +125,15 @@ impl VirtualPad {
     }
 }
 
+/// the virtual keyboard; since M2 it lives in the guardian process (guardian.rs), which owns the uinput fd
 pub struct VirtualKbd {
     pub u: Uinput,
-    held: std::collections::BTreeSet<u16>,
+    pub held: std::collections::BTreeSet<u16>,
 }
 
 impl VirtualKbd {
     pub fn create() -> Result<VirtualKbd, String> {
-        let u = Uinput::create(&UinputSpec { name: KBD_NAME, keys: keycodes::all_codes(), abs: vec![], props: vec![] })?;
+        let u = Uinput::create(&UinputSpec { keys: keycodes::all_codes(), leds: vec![LED_NUML, LED_CAPSL, LED_SCROLLL], ..UinputSpec::new(KBD_NAME) })?;
         Ok(VirtualKbd { u, held: Default::default() })
     }
     pub fn key(&mut self, code: u16, pressed: bool) {
@@ -152,6 +153,83 @@ impl VirtualKbd {
         }
         v.len()
     }
+}
+
+pub const MOUSE_NAME: &str = "dexhid mouse";
+
+/// "dexhid mouse" (M2 relative-mouse fallback): REL_X/Y, wheels (hi-res), BTN_LEFT/RIGHT/MIDDLE
+pub struct VirtualMouse {
+    pub u: Uinput,
+    buttons: std::collections::BTreeSet<u16>,
+}
+
+impl VirtualMouse {
+    pub fn create() -> Result<VirtualMouse, String> {
+        let u = Uinput::create(&UinputSpec {
+            keys: vec![BTN_LEFT, BTN_RIGHT, BTN_MIDDLE],
+            rels: vec![REL_X, REL_Y, REL_WHEEL, REL_HWHEEL, REL_WHEEL_HI_RES, REL_HWHEEL_HI_RES],
+            props: vec![INPUT_PROP_POINTER],
+            ..UinputSpec::new(MOUSE_NAME)
+        })?;
+        Ok(VirtualMouse { u, buttons: Default::default() })
+    }
+    pub fn apply(&mut self, outs: &[dexhid_core::mouse::MOut]) {
+        use dexhid_core::mouse::MOut;
+        for o in outs {
+            match *o {
+                MOut::Rel(x, y) => {
+                    if x != 0 {
+                        self.u.emit(EV_REL, REL_X, x);
+                    }
+                    if y != 0 {
+                        self.u.emit(EV_REL, REL_Y, y);
+                    }
+                }
+                MOut::Button(b, p) => {
+                    if p {
+                        self.buttons.insert(b);
+                    } else {
+                        self.buttons.remove(&b);
+                    }
+                    self.u.emit(EV_KEY, b, p as i32);
+                }
+                MOut::Wheel(v, h) => {
+                    if v != 0 {
+                        self.u.emit(EV_REL, REL_WHEEL_HI_RES, v);
+                        if v % 120 == 0 {
+                            self.u.emit(EV_REL, REL_WHEEL, v / 120);
+                        }
+                    }
+                    if h != 0 {
+                        self.u.emit(EV_REL, REL_HWHEEL_HI_RES, h);
+                        if h % 120 == 0 {
+                            self.u.emit(EV_REL, REL_HWHEEL, h / 120);
+                        }
+                    }
+                }
+            }
+            self.u.syn();
+        }
+    }
+    pub fn release_all(&mut self) {
+        let b: Vec<u16> = self.buttons.iter().copied().collect();
+        for c in b {
+            self.u.emit(EV_KEY, c, 0);
+            self.u.syn();
+        }
+        self.buttons.clear();
+    }
+}
+
+/// destroy uinput devices off the critical path: UI_DEV_DESTROY waits for RCU grace periods and the device
+/// consumers (tens of ms each on the tablet), so the release returns at once and this thread finishes the job
+/// (the order stays: keys up + contacts lifted + ungrab happen before; destroy after)
+pub fn destroy_later<T: Send + 'static>(what: &'static str, dev: T) {
+    let t0 = crate::sys::mono_ns();
+    let _ = std::thread::Builder::new().name("reaper".into()).spawn(move || {
+        drop(dev);
+        println!("DESTROYED t={} dev={} took_ms={:.1}", crate::sys::mono_ms(), what, (crate::sys::mono_ns() - t0) as f64 / 1e6);
+    });
 }
 
 // ---------- replay touchscreen (test tool, `dexhid debug replay`) ----------
@@ -213,12 +291,16 @@ pub fn create_replay_ts(name: &str, clone: Option<&str>) -> Result<Ts, String> {
         (ABS_MT_PRESSURE, press),
         (ABS_MT_TOUCH_MAJOR, major),
     ];
-    let u = Uinput::create(&UinputSpec { name, keys: vec![BTN_TOUCH], abs, props: vec![INPUT_PROP_DIRECT] })?;
+    let u = Uinput::create(&UinputSpec { keys: vec![BTN_TOUCH], abs, props: vec![INPUT_PROP_DIRECT], ..UinputSpec::new(name) })?;
     Ok(Ts { u, xmax: x.maximum, ymax: y.maximum, slots: slot.maximum + 1, next_id: 1 })
 }
 
 impl Ts {
     pub fn down(&mut self, slot: i32, x: i32, y: i32) {
+        self.down_major(slot, x, y, 20);
+    }
+    /// a contact with a given touch major (palm replay)
+    pub fn down_major(&mut self, slot: i32, x: i32, y: i32, major: i32) {
         let id = self.next_id;
         self.next_id = (self.next_id % 65535) + 1;
         self.u.emit(EV_ABS, ABS_MT_SLOT, slot);
@@ -226,7 +308,7 @@ impl Ts {
         self.u.emit(EV_ABS, ABS_MT_POSITION_X, x);
         self.u.emit(EV_ABS, ABS_MT_POSITION_Y, y);
         self.u.emit(EV_ABS, ABS_MT_PRESSURE, 60);
-        self.u.emit(EV_ABS, ABS_MT_TOUCH_MAJOR, 20);
+        self.u.emit(EV_ABS, ABS_MT_TOUCH_MAJOR, major);
     }
     pub fn mv(&mut self, slot: i32, x: i32, y: i32) {
         self.u.emit(EV_ABS, ABS_MT_SLOT, slot);

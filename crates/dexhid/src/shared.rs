@@ -31,6 +31,17 @@ pub enum Cmd {
     Sleep(bool, Option<SyncSender<()>>),
     Lid(bool),
     Note(String),
+    // M2
+    /// D-Bus SetSetting(key, value) -> reply
+    SetSetting(String, String, SyncSender<Result<String, String>>),
+    /// D-Bus GetSettings -> JSON
+    GetSettings(SyncSender<String>),
+    /// D-Bus RunQuick(id)
+    RunQuick(String),
+    /// KDE layout tracker: active group, layout names
+    XkbGroup(u32, Vec<String>),
+    /// theme "auto": the desktop's scheme
+    ThemeAuto(String),
 }
 
 /// UI-side configuration (fixed at start)
@@ -61,6 +72,8 @@ pub struct Shared {
     pub layout_names: Mutex<Vec<String>>,
     pub debug: bool,
     pub ui_cfg: UiCfg,
+    /// M2: the active xkb group for the legends (KDE layout tracker), read by the UI thread
+    pub xkb_group: std::sync::atomic::AtomicU32,
 }
 
 impl Shared {

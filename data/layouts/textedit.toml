@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# DexHid layout (M2): text editing pad. Arrows, word jump (Ctrl+arrows), select (Shift+arrows, Ctrl+Shift+arrows),
+# line / document start and end, clipboard and undo chords. Shortcuts are the common Linux desktop ones.
+# The cursor joystick and select-while-moving modes are the planned "Text editing mode" module (M3).
+name = "textedit"
+title = "Text editing"
+description = "Arrows, word jump, selection, Home / End, clipboard"
+
+[[part]]
+region = "keyboard"
+
+[[part.page]]
+id = "main"
+
+[[part.page.row]]
+keys = [
+  { key = "LEFTCTRL+HOME", label = "Doc start" }, { key = "HOME" }, { key = "LEFTCTRL+LEFT", label = "« word" },
+  { key = "UP" }, { key = "LEFTCTRL+RIGHT", label = "word »" }, { key = "END" }, { key = "LEFTCTRL+END", label = "Doc end" },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "LEFTSHIFT+HOME", label = "Sel ⇤" }, { key = "LEFTCTRL+LEFTSHIFT+LEFT", label = "Sel « word" }, { key = "LEFT" },
+  { key = "DOWN" }, { key = "RIGHT" }, { key = "LEFTCTRL+LEFTSHIFT+RIGHT", label = "Sel word »" }, { key = "LEFTSHIFT+END", label = "Sel ⇥" },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "LEFTSHIFT+LEFT", label = "Sel ←" }, { key = "LEFTSHIFT+UP", label = "Sel ↑" }, { key = "LEFTSHIFT+DOWN", label = "Sel ↓" },
+  { key = "LEFTSHIFT+RIGHT", label = "Sel →" }, { key = "LEFTCTRL+A", label = "Select all" }, { key = "BACKSPACE", label = "⌫" }, { key = "DELETE" },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "LEFTCTRL+X", label = "Cut" }, { key = "LEFTCTRL+C", label = "Copy" }, { key = "LEFTCTRL+V", label = "Paste" },
+  { key = "LEFTCTRL+Z", label = "Undo" }, { key = "LEFTCTRL+LEFTSHIFT+Z", label = "Redo" }, { key = "TAB" }, { key = "ENTER", label = "⏎" },
+]

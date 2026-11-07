@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const TOUCHPAD: &str = "touchpad";
+/// the quick-actions bar (M2)
+pub const QUICK: &str = "quick";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Orientation {
@@ -93,6 +95,24 @@ impl Arrangement {
             }
         } else {
             v.push((TOUCHPAD, Rect::new(0.0, 0.0, 1.0, 1.0)));
+        }
+        // the quick-actions bar (M2): carved out of free space next to / above the touchpad
+        if has(QUICK) {
+            let kb_any = has("keyboard");
+            let split = has("keyboard_left") || has("keyboard_right");
+            let q = if land && kb_any {
+                // the touchpad row leaves 0.18 free on each side: the bar takes the left column
+                Rect::new(0.0, 0.58, 0.16, 0.42)
+            } else {
+                // top strip of the touchpad: shrink the touchpad below it
+                let tp = v.iter_mut().find(|(id, _)| *id == TOUCHPAD).map(|(_, r)| r).unwrap();
+                let qh = if split || !kb_any { 0.12 } else { 0.08 };
+                let q = Rect::new(tp.x, tp.y, tp.w, qh);
+                tp.y += qh + 0.02;
+                tp.h -= qh + 0.02;
+                q
+            };
+            v.push((QUICK, q));
         }
         // regions a custom layout adds that the presets above do not know: stack them at the bottom
         let extra: Vec<&String> = kb_regions.iter().filter(|r| !v.iter().any(|(id, _)| id == r)).collect();
@@ -208,9 +228,33 @@ pub enum Handle {
     TopRight,
     BottomLeft,
     BottomRight,
+    /// edge handles (M2): resize one side only
+    Left,
+    Right,
+    Top,
+    Bottom,
 }
 
-/// which handle of region `r` (px) a contact at (x, y) grabs: corners within `hs` px resize, the rest moves
+impl Handle {
+    /// (moves left, moves top, moves right, moves bottom)
+    fn sides(&self) -> (bool, bool, bool, bool) {
+        match self {
+            Handle::Move => (true, true, true, true),
+            Handle::TopLeft => (true, true, false, false),
+            Handle::TopRight => (false, true, true, false),
+            Handle::BottomLeft => (true, false, false, true),
+            Handle::BottomRight => (false, false, true, true),
+            Handle::Left => (true, false, false, false),
+            Handle::Right => (false, false, true, false),
+            Handle::Top => (false, true, false, false),
+            Handle::Bottom => (false, false, false, true),
+        }
+    }
+}
+
+/// Which handle of region `r` (px) a contact at (x, y) grabs: corners within `hs` px resize two sides, a band of
+/// `hs * 0.6` along each edge (away from the corners) resizes that side, the rest moves. The hit area reaches
+/// `hs / 4` outside the region so a corner at the panel edge stays easy to hit.
 pub fn hit_handle(r: &Rect, x: f32, y: f32, hs: f32) -> Option<Handle> {
     if !r.inset(-hs * 0.25).contains(x, y) {
         return None;
@@ -220,13 +264,53 @@ pub fn hit_handle(r: &Rect, x: f32, y: f32, hs: f32) -> Option<Handle> {
     let right = x >= r.right() - hs;
     let top = y < r.y + hs;
     let bottom = y >= r.bottom() - hs;
+    let e = hs * 0.6;
     Some(match (left, right, top, bottom) {
         (true, _, true, _) => Handle::TopLeft,
         (_, true, true, _) => Handle::TopRight,
         (true, _, _, true) => Handle::BottomLeft,
         (_, true, _, true) => Handle::BottomRight,
+        _ if x < r.x + e => Handle::Left,
+        _ if x >= r.right() - e => Handle::Right,
+        _ if y < r.y + e => Handle::Top,
+        _ if y >= r.bottom() - e => Handle::Bottom,
         _ => Handle::Move,
     })
+}
+
+/// A snap guide to draw while dragging: a vertical (`vertical`) or horizontal line at `pos` from `from` to `to`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Guide {
+    pub vertical: bool,
+    pub pos: f32,
+    pub from: f32,
+    pub to: f32,
+}
+
+/// The guides for a dragged rect: every edge of `r` that lies on a work-area edge or on an edge of another region
+/// (within half a pixel), drawn across both the rect and the target.
+pub fn guides(r: &Rect, c: &EditCtx) -> Vec<Guide> {
+    let mut v = vec![];
+    let a = &c.area;
+    let mut tx: Vec<(f32, f32, f32)> = vec![(a.x, a.y, a.bottom()), (a.right(), a.y, a.bottom())];
+    let mut ty: Vec<(f32, f32, f32)> = vec![(a.y, a.x, a.right()), (a.bottom(), a.x, a.right())];
+    for o in c.others {
+        tx.push((o.x, o.y, o.bottom()));
+        tx.push((o.right(), o.y, o.bottom()));
+        ty.push((o.y, o.x, o.right()));
+        ty.push((o.bottom(), o.x, o.right()));
+    }
+    for e in [r.x, r.right()] {
+        if let Some(&(p, f, t)) = tx.iter().find(|(p, _, _)| (p - e).abs() < 0.5) {
+            v.push(Guide { vertical: true, pos: p, from: f.min(r.y), to: t.max(r.bottom()) });
+        }
+    }
+    for e in [r.y, r.bottom()] {
+        if let Some(&(p, f, t)) = ty.iter().find(|(p, _, _)| (p - e).abs() < 0.5) {
+            v.push(Guide { vertical: false, pos: p, from: f.min(r.x), to: t.max(r.right()) });
+        }
+    }
+    v
 }
 
 pub struct EditCtx<'a> {
@@ -269,13 +353,12 @@ pub fn drag(orig: &Rect, h: Handle, dx: f32, dy: f32, c: &EditCtx) -> Rect {
         }
         _ => {
             let (mut l, mut t, mut rr, mut b) = (orig.x, orig.y, orig.right(), orig.bottom());
-            let movl = matches!(h, Handle::TopLeft | Handle::BottomLeft);
-            let movt = matches!(h, Handle::TopLeft | Handle::TopRight);
+            let (movl, movt, movr, movb) = h.sides();
             if movl {
                 l = (l + dx).clamp(a.x, rr - mw);
                 l += snap_to(l, &tx, c.snap).unwrap_or(0.0);
                 l = l.clamp(a.x, rr - mw);
-            } else {
+            } else if movr {
                 rr = (rr + dx).clamp(l + mw, a.right());
                 rr += snap_to(rr, &tx, c.snap).unwrap_or(0.0);
                 rr = rr.clamp(l + mw, a.right());
@@ -284,7 +367,7 @@ pub fn drag(orig: &Rect, h: Handle, dx: f32, dy: f32, c: &EditCtx) -> Rect {
                 t = (t + dy).clamp(a.y, b - mh);
                 t += snap_to(t, &ty, c.snap).unwrap_or(0.0);
                 t = t.clamp(a.y, b - mh);
-            } else {
+            } else if movb {
                 b = (b + dy).clamp(t + mh, a.bottom());
                 b += snap_to(b, &ty, c.snap).unwrap_or(0.0);
                 b = b.clamp(t + mh, a.bottom());
@@ -392,6 +475,48 @@ mod tests {
         assert_eq!(hit_handle(&r, 395.0, 395.0, 40.0), Some(Handle::BottomRight));
         assert_eq!(hit_handle(&r, 250.0, 250.0, 40.0), Some(Handle::Move));
         assert_eq!(hit_handle(&r, 50.0, 50.0, 40.0), None);
+        // edge bands (24 px = 0.6 * 40) away from the corners
+        assert_eq!(hit_handle(&r, 110.0, 250.0, 40.0), Some(Handle::Left));
+        assert_eq!(hit_handle(&r, 390.0, 250.0, 40.0), Some(Handle::Right));
+        assert_eq!(hit_handle(&r, 250.0, 105.0, 40.0), Some(Handle::Top));
+        assert_eq!(hit_handle(&r, 250.0, 398.0, 40.0), Some(Handle::Bottom));
+        assert_eq!(hit_handle(&r, 130.0, 250.0, 40.0), Some(Handle::Move));
+    }
+
+    #[test]
+    fn edge_resize_moves_one_side_and_guides() {
+        let area = Rect::new(0.0, 70.0, 1696.0, 1130.0);
+        let kb = Rect::new(0.0, 70.0, 1696.0, 600.0);
+        let orig = Rect::new(300.0, 700.0, 1000.0, 400.0);
+        let others = [kb];
+        let c = EditCtx { area, snap: 20.0, min: (250.0, 180.0), others: &others };
+        let r = drag(&orig, Handle::Right, -200.0, 50.0, &c);
+        assert_eq!(r, Rect::new(300.0, 700.0, 800.0, 400.0), "only the right side moves, dy ignored");
+        let r = drag(&orig, Handle::Top, 40.0, -20.0, &c);
+        assert_eq!(r, Rect::new(300.0, 670.0, 1000.0, 430.0), "top snaps onto the keyboard's bottom edge");
+        let g = guides(&r, &c);
+        assert!(g.iter().any(|g| !g.vertical && g.pos == 670.0), "{:?}", g);
+        let r = drag(&orig, Handle::Bottom, 0.0, 500.0, &c);
+        assert_eq!(r.bottom(), area.bottom());
+        assert!(guides(&r, &c).iter().any(|g| !g.vertical && g.pos == area.bottom()));
+    }
+
+    #[test]
+    fn quick_bar_defaults() {
+        for regs in [s(&["keyboard", QUICK]), s(&["keyboard", "numpad", QUICK]), s(&["keyboard_left", "keyboard_right", QUICK]), s(&[QUICK])] {
+            for o in [Orientation::Landscape, Orientation::Portrait] {
+                let a = Arrangement::default_for("x", &regs, o);
+                let q = a.get(QUICK).expect("quick placed");
+                assert!(q.w > 0.05 && q.h > 0.05);
+                let rects: Vec<Rect> = a.regions.iter().map(|r| r.rect()).collect();
+                for (i, r) in rects.iter().enumerate() {
+                    assert!(r.x >= 0.0 && r.y >= 0.0 && r.right() <= 1.0001 && r.bottom() <= 1.0001, "{:?}", r);
+                    for q in &rects[i + 1..] {
+                        assert!(!r.overlaps(q), "{:?} {:?} {:?} {:?}", regs, o, r, q);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
