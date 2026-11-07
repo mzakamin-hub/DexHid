@@ -24,7 +24,17 @@ mod render;
 mod shared;
 mod sys;
 mod ui;
+mod wallpaper;
 mod xkb;
+
+/// M2.1: where the panel restore record lives ($XDG_STATE_HOME/dexhid/panels.json)
+pub fn panels_state() -> PathBuf {
+    let base = match std::env::var("XDG_STATE_HOME") {
+        Ok(v) if !v.is_empty() => PathBuf::from(v),
+        _ => PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())).join(".local/state"),
+    };
+    base.join("dexhid/panels.json")
+}
 
 use std::path::PathBuf;
 
@@ -85,12 +95,16 @@ fn main() {
         Some("debug-disconnect") => client("DebugConnector", Some("disconnect")),
         Some("debug") => debug::run(&debug::Args(argv[1..].to_vec())),
         Some("--restore") => {
-            // ExecStopPost: put back a brightness the daemon dimmed (the state is in $XDG_RUNTIME_DIR/dexhid)
+            // ExecStopPost: put back a brightness the daemon dimmed (the state is in $XDG_RUNTIME_DIR/dexhid) and
+            // (M2.1) the Plasma panels it moved to the monitor ($XDG_STATE_HOME/dexhid/panels.json)
             println!("{}", desktop::restore());
+            if let Some(r) = desktop::panels_restore(&panels_state(), "restore") {
+                println!("{}", r);
+            }
             0
         }
         Some("version") | Some("--version") => {
-            println!("dexhid {} (M2, GPL-3.0-or-later PROVISIONAL)", env!("CARGO_PKG_VERSION"));
+            println!("dexhid {} (M2.1, GPL-3.0-or-later PROVISIONAL)", env!("CARGO_PKG_VERSION"));
             0
         }
         _ => usage(),

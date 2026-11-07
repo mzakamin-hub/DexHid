@@ -8,7 +8,8 @@
 //!                                          virtual volume keys (the daemon grabs it via --chord-test-dev)
 //! FIFO commands (one per line, several per line with ';'), coordinates in native touch units:
 //!   tap X Y [MS] | hold X Y MS | drag X0 Y0 X1 Y1 MS | press S X Y | pressm S X Y MAJOR | moveto S X Y | release S
-//!   multi N X Y DX MS (N fingers DX apart, held MS) | down CODE.. | up CODE.. (volsim) | sleep MS | mark ID | quit
+//!   multi N X Y DX MS (N fingers DX apart, held MS) | swipe MS DX DY X1 Y1 [X2 Y2 ..] (M2.1: fingers moved together)
+//!   down CODE.. | up CODE.. (volsim) | sleep MS | mark ID | quit
 
 use crate::devices::{create_replay_ts, Ts};
 use crate::sys::*;
@@ -260,6 +261,30 @@ fn replay(a: &Args) -> i32 {
             }
             "moveto" => r.moveto(p(w, 1).max(0) as usize, p(w, 2), p(w, 3)),
             "release" => r.release(p(w, 1).max(0) as usize),
+            // M2.1: swipe MS DX DY X1 Y1 [X2 Y2 ...]: fingers at the points (slots 0..), all moved by DX DY over MS
+            // in 8 ms steps, then lifted (whole-screen swipes, two-finger flicks)
+            "swipe" => {
+                let ms = p(w, 1).max(16);
+                let (dx, dy) = (p(w, 2), p(w, 3));
+                let pts: Vec<(i32, i32)> = (4..w.len()).step_by(2).map(|i| (p(w, i), p(w, i + 1))).collect();
+                for (i, &(x, y)) in pts.iter().enumerate() {
+                    r.press(i, x, y);
+                    sleep_ms(4);
+                }
+                sleep_ms(30);
+                let steps = (ms / 8).max(2);
+                for s in 1..=steps {
+                    for (i, &(x, y)) in pts.iter().enumerate() {
+                        if i < r.down.len() && r.down[i].is_some() {
+                            r.ts.mv(i as i32, x + dx * s / steps, y + dy * s / steps);
+                            r.down[i] = Some((x + dx * s / steps, y + dy * s / steps));
+                        }
+                    }
+                    r.frame();
+                    sleep_ms(8);
+                }
+                r.release_all();
+            }
             "multi" => {
                 let (k, x, y, dx, ms) = (p(w, 1).clamp(1, 10) as usize, p(w, 2), p(w, 3), p(w, 4), p(w, 5).max(0));
                 for i in 0..k {

@@ -8,6 +8,11 @@
 //! recreated it on every drag step, which made the daemon lag behind the finger), the settings sheet (built from the
 //! settings registry), quick actions, palm / rest-zone / disable-while-typing / pen-proximity filters, sticky
 //! modifiers, the Fn layer, combo keys and long-press alternates (keys.rs), Caps / Num lock LEDs, theme + status text.
+//!
+//! M2.1: key slop (a stationary hold, slide-off with hysteresis), the mask key for cancelled modifiers, whole-screen
+//! 3/4-finger swipes (swipe.rs) delivered as synthetic fingers on the virtual touchpad (so the desktop's own
+//! touchpad gestures run), independent click zones with an optional left+right = middle chord, two-finger scroll
+//! inertia (touchpad.rs), AltGr state for the legends, the "laptop" arrangement preset.
 
 use crate::arrangement::{self, Arrangement, EditCtx, Guide, Handle, Orientation, QUICK, TOUCHPAD};
 use crate::geom::{Geometry, Rect};
@@ -16,7 +21,8 @@ use crate::keys::{ContactId, KeyMachine, KeyOut};
 use crate::layout::{Action, KeyKind, Layout, PlacedKey};
 use crate::mt::Contact;
 use crate::settings::{Kind, Row};
-use crate::touchpad::{PadFrame, PadMapper};
+use crate::swipe::{Phase, Swipe, SwipeCfg};
+use crate::touchpad::{Inertia, PadFrame, PadMapper, SLOTS};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
@@ -48,6 +54,21 @@ pub struct RouterCfg {
     pub pen_pause: bool,
     /// show the quick-actions region
     pub quick: bool,
+    // M2.1
+    /// movement that restarts a pending key hold, and the hysteresis for sliding off a key (mm)
+    pub key_slop_mm: f32,
+    /// neutral key between a cancelled lone modifier's press and release (None = off)
+    pub mask_key: Option<u16>,
+    /// whole-screen 3/4-finger swipes
+    pub swipe: bool,
+    pub swipe_min_mm: f32,
+    /// both click zones within 50 ms = middle button
+    pub chord_middle: bool,
+    pub inertia: Inertia,
+    /// "laptop" arrangement preset (else free placement)
+    pub laptop: bool,
+    /// laptop preset: touchpad width in % of the keyboard width
+    pub laptop_pad_pct: f32,
 }
 
 impl Default for RouterCfg {
@@ -75,6 +96,14 @@ impl Default for RouterCfg {
             dwt_ms: 0,
             pen_pause: true,
             quick: false,
+            key_slop_mm: 3.0,
+            mask_key: Some(240),
+            swipe: true,
+            swipe_min_mm: 8.0,
+            chord_middle: false,
+            inertia: Inertia::default(),
+            laptop: false,
+            laptop_pad_pct: 100.0,
         }
     }
 }
@@ -173,6 +202,14 @@ pub struct UiModel {
     pub theme: (String, String, u32),
     /// Caps Lock, Num Lock LEDs (from the desktop, through the virtual keyboard)
     pub leds: (bool, bool),
+    /// M2.1: AltGr (level 3) held or latched on the panel
+    pub altgr: bool,
+    /// M2.1: the arrangement comes from the laptop preset
+    pub laptop: bool,
+    /// M2.1: the desktop's look (theme "desktop"), None = built-in palette
+    pub desk: Option<crate::feedback::DeskLook>,
+    /// M2.1: wallpaper image behind the deck ("" = none)
+    pub wallpaper: String,
     /// latched sticky modifiers (code, locked)
     pub latched: Vec<(u16, bool)>,
     pub fn_on: bool,
@@ -210,6 +247,10 @@ pub enum Out {
     SettingStep(String, i32),
     /// a key press reached the virtual keyboard (feedback: sound / haptics)
     KeyFeedback,
+    /// M2.1: a whole-screen swipe took over / ended (log line for the runner)
+    Swipe(String),
+    /// M2.1: set a setting to a value (edit mode from the laptop preset switches to free placement)
+    SetSetting(String, String),
     /// static model changed (full redraw), dynamic changed (pressed keys / dots)
     Static,
     Dynamic,
@@ -224,7 +265,20 @@ enum Owner {
     Key,
     Quick(usize),
     Edit { handle: Handle, region: String, orig: Rect, x0: f32, y0: f32 },
+    /// M2.1: a participant of a recognised whole-screen swipe (synthetic finger index)
+    Swipe(usize),
     Ignored,
+}
+
+/// M2.1: the synthetic touchpad fingers of a recognised whole-screen swipe
+#[derive(Clone, Debug)]
+struct Synth {
+    /// device positions of the fingers
+    fingers: Vec<(f32, f32)>,
+    lifted: bool,
+    /// travel still to deliver in small steps (device units)
+    catch: (f32, f32),
+    next: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -265,6 +319,10 @@ pub struct Router {
     last_key_t: i64,
     /// sheet rows on screen: (row index in the module, key)
     sheet_keys: Vec<String>,
+    swipe: Swipe,
+    synth: Option<Synth>,
+    desk: Option<crate::feedback::DeskLook>,
+    wallpaper: String,
 }
 
 impl Router {
@@ -273,6 +331,8 @@ impl Router {
         let mut keys = KeyMachine::new(cfg.hold_ms);
         keys.long_ms = cfg.long_ms;
         keys.sticky = cfg.sticky;
+        keys.mask = cfg.mask_key;
+        let swipe = Swipe::new(SwipeCfg { enabled: cfg.swipe, ..Default::default() });
         Router {
             cfg,
             geo: None,
@@ -301,7 +361,25 @@ impl Router {
             notice: String::new(),
             last_key_t: i64::MIN / 2,
             sheet_keys: vec![],
+            swipe,
+            synth: None,
+            desk: None,
+            wallpaper: String::new(),
         }
+    }
+
+    /// M2.1: the desktop's look (theme "desktop") and the wallpaper path ("" = none)
+    pub fn set_look(&mut self, desk: Option<crate::feedback::DeskLook>, wallpaper: &str) -> Vec<Out> {
+        if self.desk == desk && self.wallpaper == wallpaper {
+            return vec![];
+        }
+        self.desk = desk;
+        self.wallpaper = wallpaper.to_string();
+        self.relayout()
+    }
+
+    pub fn swipe_phase(&self) -> Phase {
+        self.swipe.phase()
     }
 
     pub fn ready(&self) -> bool {
@@ -355,6 +433,8 @@ impl Router {
         self.keys.hold_ms = cfg.hold_ms;
         self.keys.long_ms = cfg.long_ms;
         self.keys.sticky = cfg.sticky;
+        self.keys.mask = cfg.mask_key;
+        self.swipe.cfg.enabled = cfg.swipe;
         self.cfg = cfg;
         out.extend(self.relayout());
         out
@@ -606,24 +686,46 @@ impl Router {
         view
     }
 
+    /// the laptop preset applies (a layout with a main "keyboard" region, not while editing)
+    fn laptop_active(&self) -> bool {
+        self.cfg.laptop && !self.edit && self.layout.regions(&self.cfg.options).iter().any(|r| r == "keyboard")
+    }
+
+    /// M2.1 "laptop" preset: keys on a laptop grid (max 19.05 mm pitch, square keys, >= 15 units wide), the
+    /// keyboard centred instead of stretched, the touchpad below with a width that follows the keyboard
+    fn laptop_arrangement(&self, area: &Rect, ppm: f32) -> Arrangement {
+        let units = |region: &str| {
+            self.layout.visible_parts(&self.cfg.options).find(|p| p.region == region).map(|p| Layout::units(Layout::page_of(p, &self.page), &self.cfg.options))
+        };
+        let kb = units("keyboard").unwrap_or((15.0, 5.0));
+        let quick = self.cfg.quick && !self.quick_items.is_empty();
+        let mut a = arrangement::laptop(area, ppm, kb, units("numpad"), quick, self.cfg.laptop_pad_pct);
+        a.layout = self.layout.name.clone();
+        a
+    }
+
     /// recompute every rect from layout + arrangement + geometry
     fn relayout(&mut self) -> Vec<Out> {
         let mut out = vec![];
         let Some(g) = self.geo else { return out };
         let ppm = g.px_per_mm();
+        self.keys.slop = self.cfg.key_slop_mm * ppm;
         let (strip, area) = self.work_area();
         let o = self.orient.unwrap_or(Orientation::Landscape);
         let kb = self.kb_regions();
         let mut required = vec![TOUCHPAD.to_string()];
         required.extend(kb.iter().cloned());
         let defaults = Arrangement::default_for(&self.layout.name, &kb, o);
-        let mut arr = self.arr.clone().unwrap_or_else(|| defaults.clone());
+        let laptop = self.laptop_active();
+        let mut arr = if laptop { self.laptop_arrangement(&area, ppm) } else { self.arr.clone().unwrap_or_else(|| defaults.clone()) };
         arr.layout = self.layout.name.clone();
         arr.orientation = o.name().into();
-        for n in arr.fixup(&required, &defaults, &area, &self.mins()) {
-            out.push(Out::Note(format!("arrangement: {}", n)));
+        if !laptop {
+            for n in arr.fixup(&required, &defaults, &area, &self.mins()) {
+                out.push(Out::Note(format!("arrangement: {}", n)));
+            }
+            self.arr = Some(arr.clone());
         }
-        self.arr = Some(arr.clone());
         let regions: Vec<RegionView> = required
             .iter()
             .filter_map(|id| arr.get(id).map(|f| RegionView { id: id.clone(), rect: Rect::from_frac(&f, &area) }))
@@ -657,6 +759,11 @@ impl Router {
                 out.push(Out::PadChanged);
             }
             self.pad = Some(np);
+        }
+        if let Some(p) = self.pad.as_mut() {
+            p.chord_middle = self.cfg.chord_middle;
+            p.inertia = self.cfg.inertia;
+            p.units_per_mm = self.cfg.pad_units_per_mm;
         }
         // buttons
         let m = (strip.h * 0.14).round();
@@ -703,6 +810,10 @@ impl Router {
             info: self.info.clone(),
             theme: self.theme.clone(),
             leds: self.leds,
+            altgr: self.keys.held_codes().contains(&keycodes::KEY_RIGHTALT),
+            laptop,
+            desk: self.desk.clone(),
+            wallpaper: self.wallpaper.clone(),
             latched: self.keys.latched(),
             fn_on: self.keys.fn_active(),
             notice,
@@ -735,7 +846,9 @@ impl Router {
             out.push(Out::Dynamic);
         }
         let latched = self.keys.latched();
-        if self.keys.shift_held() != self.model.shift || latched != self.model.latched || self.keys.fn_active() != self.model.fn_on {
+        let altgr = self.keys.held_codes().contains(&keycodes::KEY_RIGHTALT);
+        if self.keys.shift_held() != self.model.shift || latched != self.model.latched || self.keys.fn_active() != self.model.fn_on || altgr != self.model.altgr {
+            self.model.altgr = altgr;
             self.model.shift = self.keys.shift_held();
             self.model.latched = latched;
             self.model.fn_on = self.keys.fn_active();
@@ -756,7 +869,7 @@ impl Router {
         for k in v {
             match k {
                 KeyOut::Key(c, p) => {
-                    if p {
+                    if p && Some(c) != self.cfg.mask_key {
                         self.last_key_t = t;
                         out.push(Out::KeyFeedback);
                     }
@@ -779,24 +892,135 @@ impl Router {
         }
     }
 
+    /// M2.1: contacts that can take part in a whole-screen swipe (not in edit mode / the settings sheet)
+    fn swipe_update(&mut self) {
+        let live: Vec<(ContactId, f32, f32)> = if self.edit || self.sheet_open {
+            vec![]
+        } else {
+            let mut v: Vec<(ContactId, f32, f32)> = self
+                .contacts
+                .iter()
+                .filter(|(_, t)| matches!(t.owner, Owner::Strip { .. } | Owner::Pad | Owner::Key | Owner::Quick(_)))
+                .map(|(id, t)| (*id, t.x, t.y))
+                .collect();
+            v.sort_by_key(|x| x.0);
+            v
+        };
+        self.swipe.contacts_changed(&live);
+    }
+
+    fn synth_frame(&self) -> PadFrame {
+        let mut f = PadFrame::default();
+        if let Some(s) = &self.synth {
+            if !s.lifted {
+                for (i, p) in s.fingers.iter().enumerate().take(SLOTS) {
+                    f.slots[i] = Some((p.0.round() as i32, p.1.round() as i32));
+                }
+            }
+        }
+        f
+    }
+
+    /// move the synthetic fingers by (dx, dy) device units (one finger or all), clamped to the device
+    fn synth_move(&mut self, which: Option<usize>, d: (f32, f32)) {
+        let Some((xm, ym)) = self.pad.as_ref().map(|p| p.dims()) else { return };
+        if let Some(s) = self.synth.as_mut() {
+            for (i, p) in s.fingers.iter_mut().enumerate() {
+                if which.is_none_or(|w| w == i) {
+                    p.0 = (p.0 + d.0).clamp(0.0, xm as f32);
+                    p.1 = (p.1 + d.1).clamp(0.0, ym as f32);
+                }
+            }
+        }
+    }
+
+    /// M2.1: a whole-screen swipe won: release panel-owned keys / buttons / scrolling, capture every contact, put
+    /// the same number of synthetic fingers on the virtual touchpad so libinput recognises the desktop's gesture
+    fn start_swipe(&mut self, r: crate::swipe::Recognised, t: i64, out: &mut Vec<Out>) {
+        let n = r.ids.len();
+        if r.ids.iter().all(|id| matches!(self.contacts.get(id).map(|c| &c.owner), Some(Owner::Pad))) {
+            out.push(Out::Swipe(format!("native fingers={} (all on the touchpad: libinput's own gesture)", n)));
+            return;
+        }
+        let held = self.keys.held_codes().len();
+        let v = self.keys.release_all();
+        self.key_outs(v, t, out);
+        let mut buttons = 0;
+        if let Some(p) = self.pad.as_mut() {
+            buttons = p.buttons_down().len();
+            if let Some(f) = p.release_all() {
+                out.push(Out::Pad(f));
+            }
+        }
+        for (id, tr) in self.contacts.iter_mut() {
+            tr.owner = match r.ids.iter().position(|x| x == id) {
+                Some(i) => Owner::Swipe(i),
+                None => Owner::Ignored,
+            };
+        }
+        let Some(p) = self.pad.as_ref() else { return };
+        let (xm, ym) = p.dims();
+        let upm = self.cfg.pad_units_per_mm;
+        let spacing = (15.0 * upm).min(xm as f32 / (n as f32 + 1.0));
+        let cx = xm as f32 * (0.5 - 0.3 * r.dir.0);
+        let cy = ym as f32 * (0.5 - 0.3 * r.dir.1);
+        let fingers: Vec<(f32, f32)> = (0..n).map(|i| ((cx + (i as f32 - (n as f32 - 1.0) / 2.0) * spacing).clamp(0.0, xm as f32), cy.clamp(0.0, ym as f32))).collect();
+        // the travel before recognition is delivered in small steps (no jump for libinput), at most 25 mm
+        let mut catch = (r.travel.0 * p.units_per_px, r.travel.1 * p.units_per_px);
+        let cl = (catch.0 * catch.0 + catch.1 * catch.1).sqrt();
+        if cl > 25.0 * upm {
+            catch = (catch.0 * 25.0 * upm / cl, catch.1 * 25.0 * upm / cl);
+        }
+        self.synth = Some(Synth { fingers, lifted: false, catch, next: t + crate::touchpad::STEP_MS });
+        out.push(Out::Pad(self.synth_frame()));
+        out.push(Out::Swipe(format!("start fingers={} dir={:.2},{:.2} released_keys={} released_buttons={}", n, r.dir.0, r.dir.1, held, buttons)));
+    }
+
+    fn end_synth(&mut self, out: &mut Vec<Out>, why: &str) {
+        if let Some(s) = self.synth.as_mut() {
+            if !s.lifted {
+                s.lifted = true;
+                out.push(Out::Pad(PadFrame::default()));
+                out.push(Out::Swipe(format!("end ({})", why)));
+            }
+        }
+    }
+
     pub fn contact(&mut self, c: Contact, t: i64) -> Vec<Out> {
         let mut out = vec![];
         let Some(g) = self.geo else { return out };
         match c {
             Contact::Down { id, x, y, major } => {
                 let (lx, ly) = g.touch_to_logical(x, y);
-                let owner = self.owner_for_down(id, lx, ly, major, t, &mut out);
+                // any new touch stops a scroll inertia (its virtual fingers lift in their own frame)
+                if let Some(p) = self.pad.as_mut() {
+                    if p.coasting() {
+                        p.stop_coast();
+                        self.pad_frame(&mut out);
+                        out.push(Out::Note("inertia stopped by a touch".into()));
+                    }
+                }
+                let owner = if self.swipe.phase() == Phase::Active { Owner::Ignored } else { self.owner_for_down(id, lx, ly, major, t, &mut out) };
                 self.contacts.insert(id, Track { x: lx, y: ly, x0: lx, y0: ly, owner });
                 if self.cfg.five_finger && self.contacts.len() >= 5 && self.five.is_none() && !self.five_blocked {
                     self.five = Some((t, false));
                 }
+                self.swipe_update();
             }
             Contact::Move { id, x, y, .. } => {
                 let (lx, ly) = g.touch_to_logical(x, y);
                 let Some(tr) = self.contacts.get_mut(&id) else { return out };
+                let (ox, oy) = (tr.x, tr.y);
                 tr.x = lx;
                 tr.y = ly;
                 let tr = tr.clone();
+                if let Owner::Swipe(i) = tr.owner {
+                    if self.synth.as_ref().is_some_and(|s| !s.lifted) {
+                        let upp = self.pad.as_ref().map(|p| p.units_per_px).unwrap_or(1.0);
+                        self.synth_move(Some(i), ((lx - ox) * upp, (ly - oy) * upp));
+                        out.push(Out::Pad(self.synth_frame()));
+                    }
+                }
                 let ppm = g.px_per_mm();
                 let moved = ((tr.x - tr.x0).powi(2) + (tr.y - tr.y0).powi(2)).sqrt();
                 if self.five.is_some() && moved > self.cfg.five_slop_mm * ppm {
@@ -806,13 +1030,15 @@ impl Router {
                 match tr.owner {
                     Owner::Pad => {
                         if let Some(p) = self.pad.as_mut() {
-                            p.motion(id, lx, ly);
+                            p.motion(id, lx, ly, t);
                         }
                         self.pad_frame(&mut out);
                     }
                     Owner::Key => {
-                        let k = self.hit_key(lx, ly);
-                        let v = self.keys.motion(id, k);
+                        // off the key = outside its rect grown by the slop (hysteresis at the key edges)
+                        let slop = self.cfg.key_slop_mm * ppm;
+                        let on = self.keys.key_of(id).and_then(|k| self.model.keys.get(k)).is_some_and(|k| k.rect.inset(-slop).contains(lx, ly));
+                        let v = self.keys.motion(id, on, (lx, ly), t);
                         self.key_outs(v, t, &mut out);
                     }
                     Owner::Edit { handle, ref region, orig, x0, y0 } => {
@@ -839,10 +1065,18 @@ impl Router {
                     }
                     _ => {}
                 }
+                if self.swipe.phase() == Phase::Candidate {
+                    let pos: HashMap<ContactId, (f32, f32)> = self.contacts.iter().map(|(i, t)| (*i, (t.x, t.y))).collect();
+                    self.swipe.cfg.min_px = self.cfg.swipe_min_mm * ppm;
+                    if let Some(r) = self.swipe.check(&pos) {
+                        self.start_swipe(r, t, &mut out);
+                    }
+                }
             }
             Contact::Up { id } => {
                 let Some(tr) = self.contacts.remove(&id) else { return out };
                 match tr.owner {
+                    Owner::Swipe(_) => self.end_synth(&mut out, "a finger lifted"),
                     Owner::Strip { btn: Some(b), long: false, .. } => {
                         if self.hit_button(tr.x, tr.y) == Some(b) {
                             self.fire(b, &mut out);
@@ -855,7 +1089,10 @@ impl Router {
                     }
                     Owner::Pad => {
                         if let Some(p) = self.pad.as_mut() {
-                            p.up(id);
+                            p.up(id, t);
+                            if p.coasting() {
+                                out.push(Out::Note("scroll inertia: virtual fingers kept".into()));
+                            }
                         }
                         self.pad_frame(&mut out);
                     }
@@ -883,6 +1120,15 @@ impl Router {
                     if self.contacts.is_empty() {
                         self.five_blocked = false;
                     }
+                }
+                if self.contacts.is_empty() {
+                    if self.swipe.phase() == Phase::Active {
+                        out.push(Out::Swipe("all contacts lifted".into()));
+                    }
+                    self.swipe.reset();
+                    self.synth = None;
+                } else {
+                    self.swipe_update();
                 }
             }
         }
@@ -946,7 +1192,7 @@ impl Router {
                     return Owner::Ignored;
                 }
                 if let Some(p) = self.pad.as_mut() {
-                    if p.down(id, x, y) {
+                    if p.down(id, x, y, t) {
                         self.pad_frame(out);
                         return Owner::Pad;
                     }
@@ -966,7 +1212,7 @@ impl Router {
             if let Some(k) = self.hit_key(x, y) {
                 let kind = self.model.keys[k].kind.clone();
                 let long = self.model.keys[k].long.clone();
-                let v = self.keys.down(id, k, &kind, long.as_ref(), t);
+                let v = self.keys.down(id, k, &kind, long.as_ref(), t, (x, y));
                 self.key_outs(v, t, out);
                 return Owner::Key;
             }
@@ -981,6 +1227,14 @@ impl Router {
             if !matches!(tr.owner, Owner::Strip { .. }) {
                 tr.owner = Owner::Ignored;
             }
+        }
+        if self.laptop_active() {
+            // editing starts from the laptop arrangement and switches to free placement
+            if let Some(g) = self.geo {
+                let (_, area) = self.work_area();
+                self.arr = Some(self.laptop_arrangement(&area, g.px_per_mm()));
+            }
+            out.push(Out::SetSetting("arrangement".into(), "free".into()));
         }
         self.arr_backup = self.arr.clone();
         self.edit = true;
@@ -1069,6 +1323,25 @@ impl Router {
         }
         let v = self.keys.tick(t);
         self.key_outs(v, t, &mut out);
+        if let Some(p) = self.pad.as_mut() {
+            p.tick(t);
+        }
+        self.pad_frame(&mut out);
+        // the swipe's travel before recognition, in steps of at most 2.5 mm every 8 ms
+        let step = 2.5 * self.cfg.pad_units_per_mm;
+        if let Some((d, next)) = self.synth.as_ref().filter(|s| !s.lifted && (s.catch.0 != 0.0 || s.catch.1 != 0.0)).map(|s| (s.catch, s.next)) {
+            if t >= next {
+                let l = (d.0 * d.0 + d.1 * d.1).sqrt();
+                let k = if l > step { step / l } else { 1.0 };
+                let mv = (d.0 * k, d.1 * k);
+                self.synth_move(None, mv);
+                if let Some(s) = self.synth.as_mut() {
+                    s.catch = if k < 1.0 { (d.0 - mv.0, d.1 - mv.1) } else { (0.0, 0.0) };
+                    s.next = t + crate::touchpad::STEP_MS;
+                }
+                out.push(Out::Pad(self.synth_frame()));
+            }
+        }
         let mut long = false;
         for tr in self.contacts.values_mut() {
             if let Owner::Strip { t0, long: l, .. } = &mut tr.owner {
@@ -1094,6 +1367,13 @@ impl Router {
 
     pub fn next_deadline(&self) -> Option<i64> {
         let mut d = self.keys.next_deadline();
+        let extra = [
+            self.pad.as_ref().and_then(|p| p.next_deadline()),
+            self.synth.as_ref().filter(|s| !s.lifted && (s.catch.0 != 0.0 || s.catch.1 != 0.0)).map(|s| s.next),
+        ];
+        for x in extra.into_iter().flatten() {
+            d = Some(d.map_or(x, |y| y.min(x)));
+        }
         for tr in self.contacts.values() {
             if let Owner::Strip { t0, long: false, .. } = tr.owner {
                 let x = t0.saturating_add(self.cfg.longpress_ms);
@@ -1119,8 +1399,9 @@ impl Router {
         if let Some(f) = self.pad.as_mut().and_then(|p| p.release_all()) {
             out.push(Out::Pad(f));
         }
+        self.end_synth(&mut out, "release");
         for tr in self.contacts.values_mut() {
-            if matches!(tr.owner, Owner::Pad | Owner::Key | Owner::Quick(_)) {
+            if matches!(tr.owner, Owner::Pad | Owner::Key | Owner::Quick(_) | Owner::Swipe(_)) {
                 tr.owner = Owner::Ignored;
             }
         }
@@ -1131,6 +1412,8 @@ impl Router {
     pub fn reset_contacts(&mut self) -> Vec<Out> {
         let mut out = self.release_all();
         self.contacts.clear();
+        self.swipe.reset();
+        self.synth = None;
         self.five = None;
         self.five_blocked = false;
         self.update_dynamic(&mut out);
@@ -1612,6 +1895,246 @@ mod tests {
         let o = r.tick(1450);
         assert_eq!(keys(&o), vec![(2, true), (2, false)]);
         assert!(keys(&up(&mut r, 5, 1500)).is_empty());
+    }
+
+    // ------------------------------------------------------------------ M2.1
+
+    fn pads(o: &[Out]) -> Vec<PadFrame> {
+        o.iter().filter_map(|x| if let Out::Pad(f) = x { Some(f.clone()) } else { None }).collect()
+    }
+    fn swipes(o: &[Out]) -> Vec<String> {
+        o.iter().filter_map(|x| if let Out::Swipe(s) = x { Some(s.clone()) } else { None }).collect()
+    }
+    /// fingers at native points, moved together by (dx, dy) native units in 10 ms steps, then lifted
+    fn multi_swipe(r: &mut Router, pts: &[(i32, i32)], d: (i32, i32), steps: i32, t: i64) -> Vec<Out> {
+        let mut o = vec![];
+        for (i, p) in pts.iter().enumerate() {
+            o.extend(down(r, 100 + i as u32, *p, t + i as i64 * 5));
+        }
+        let mut tt = t + 20;
+        for s in 1..=steps {
+            tt = t + 20 + s as i64 * 10;
+            for (i, p) in pts.iter().enumerate() {
+                o.extend(mv(r, 100 + i as u32, (p.0 + d.0 * s / steps, p.1 + d.1 * s / steps), tt));
+            }
+            o.extend(r.tick(tt));
+        }
+        for i in 0..pts.len() {
+            o.extend(up(r, 100 + i as u32, tt + 10 + i as i64));
+        }
+        o
+    }
+
+    #[test]
+    fn three_finger_swipe_over_the_keyboard_becomes_a_touchpad_gesture() {
+        let mut r = router("full");
+        let pts = [at(&r, "key.KEY_Q"), at(&r, "key.KEY_W"), at(&r, "key.KEY_E")];
+        // 20 mm up (124 native units / mm)
+        let o = multi_swipe(&mut r, &pts, (0, -2480), 12, 0);
+        assert!(keys(&o).iter().all(|k| !k.1), "no key typed: {:?}", keys(&o));
+        assert!(keys(&o).is_empty(), "no key events at all: {:?}", keys(&o));
+        let sw = swipes(&o);
+        assert!(sw.iter().any(|s| s.starts_with("start fingers=3 dir=0.00,-1.00")), "{:?}", sw);
+        let f = pads(&o);
+        let three: Vec<&PadFrame> = f.iter().filter(|f| f.slots.iter().filter(|s| s.is_some()).count() == 3).collect();
+        assert!(three.len() >= 3, "synthetic fingers down and moving ({} frames)", three.len());
+        let y0 = three.first().unwrap().slots[0].unwrap().1;
+        let y1 = three.last().unwrap().slots[0].unwrap().1;
+        assert!(y1 < y0, "they move up: {} -> {}", y0, y1);
+        assert!(f.last().unwrap().slots.iter().all(|s| s.is_none()), "lifted at the end");
+        assert_eq!(r.swipe_phase(), Phase::Idle);
+        assert!(r.held_codes().is_empty());
+    }
+
+    #[test]
+    fn swipe_cancels_held_super_with_the_mask_and_stops_pad_input() {
+        let mut r = router("full");
+        // Super held by the first finger, two more fingers on the touchpad (keys would form a Super chord at
+        // once, which stays delivered): all three swipe right together
+        let c = at(&r, "region.touchpad");
+        let pts = [at(&r, "key.KEY_LEFTMETA"), (c.0 - 1500, c.1), (c.0 + 1500, c.1)];
+        let o = multi_swipe(&mut r, &pts, (2480, 0), 12, 0);
+        let k = keys(&o);
+        assert_eq!(k.first(), Some(&(125, true)), "Super pressed at once (modifier)");
+        let mi = k.iter().position(|x| *x == (240, true)).expect("mask pressed");
+        let ri = k.iter().position(|x| *x == (125, false)).expect("Super released");
+        assert!(mi < ri && k[mi + 1] == (240, false), "mask tap before the Super release: {:?}", k);
+        assert_eq!(k.len(), 4, "Super, mask, Super up only: {:?}", k);
+        assert!(swipes(&o).iter().any(|s| s.starts_with("start fingers=3")));
+        // a swipe with a pad finger in it: the pad's two-finger input stops (fingers lifted) when it wins
+        let mut r = router("full");
+        let c = at(&r, "region.touchpad");
+        let pts = [(c.0 - 1500, c.1), (c.0 + 1500, c.1), at(&r, "key.KEY_B")];
+        let o = multi_swipe(&mut r, &pts, (3000, 0), 12, 0);
+        let sw = swipes(&o);
+        assert!(sw.iter().any(|s| s.starts_with("start fingers=3")), "{:?}", sw);
+        let f = pads(&o);
+        let si = f.iter().position(|f| f.slots.iter().filter(|s| s.is_some()).count() == 3).unwrap();
+        assert!(f[si - 1].slots.iter().all(|s| s.is_none()), "the real pad fingers lifted before the synthetic ones");
+    }
+
+    #[test]
+    fn resting_chords_and_one_moving_pad_finger_stay_normal() {
+        let mut r = router("full");
+        // Ctrl + Alt resting, T tapped: a chord, no swipe
+        dn(&mut r, 1, "key.KEY_LEFTCTRL", 0);
+        dn(&mut r, 2, "key.KEY_LEFTALT", 10);
+        let o = dn(&mut r, 3, "key.KEY_T", 50);
+        assert_eq!(keys(&o), vec![(20, true)], "pressed at once inside the chord");
+        // Ctrl resting + two pad fingers scrolling: the modifier is stationary -> not a swipe
+        let c = at(&r, "region.touchpad");
+        down(&mut r, 4, c, 100);
+        down(&mut r, 5, (c.0 + 1500, c.1), 100);
+        let mut o = vec![];
+        for s in 1..=10 {
+            o.extend(mv(&mut r, 4, (c.0, c.1 - 200 * s), 100 + s as i64 * 10));
+            o.extend(mv(&mut r, 5, (c.0 + 1500, c.1 - 200 * s), 100 + s as i64 * 10));
+        }
+        assert!(swipes(&o).is_empty() && r.swipe_phase() != Phase::Active);
+        assert!(pads(&o).len() >= 10, "the pad keeps scrolling");
+        up(&mut r, 4, 300);
+        up(&mut r, 5, 300);
+        up(&mut r, 3, 300);
+        let o = up(&mut r, 2, 310);
+        assert_eq!(keys(&o), vec![(56, false)], "a used modifier: no mask");
+        // still resting Ctrl + three moving pad fingers: four contacts, one stationary -> no swipe either
+        let o = multi_swipe(&mut r, &[(c.0 - 1500, c.1), c, (c.0 + 1500, c.1)], (0, -2480), 12, 400);
+        assert!(swipes(&o).is_empty());
+        up(&mut r, 1, 900);
+        // three fingers all on the touchpad: libinput's own gesture, DexHid does not take over
+        let o = multi_swipe(&mut r, &[(c.0 - 1500, c.1), c, (c.0 + 1500, c.1)], (0, -2480), 12, 1000);
+        assert!(swipes(&o).iter().any(|s| s.starts_with("native")));
+    }
+
+    #[test]
+    fn swipe_disabled_keeps_keys() {
+        let mut cfg = RouterCfg::default();
+        cfg.swipe = false;
+        let mut r = Router::new(cfg, layout("full"));
+        r.set_geometry(geo());
+        let pts = [at(&r, "key.KEY_Q"), at(&r, "key.KEY_W"), at(&r, "key.KEY_E")];
+        let o = multi_swipe(&mut r, &pts, (0, -2480), 12, 0);
+        assert!(swipes(&o).is_empty());
+    }
+
+    #[test]
+    fn slide_off_needs_the_slop_beyond_the_key_edge() {
+        let mut r = router("full");
+        let b = boxn(&r, "key.KEY_G");
+        let cy = (b[1] + b[3]) / 2;
+        down(&mut r, 1, (b[2] - 50, cy), 0);
+        // 1 mm past the right edge: still on the key (3 mm slop)
+        mv(&mut r, 1, (b[2] + 124, cy), 20);
+        assert_eq!(keys(&up(&mut r, 1, 40)), vec![(34, true), (34, false)], "small wobble over the edge still types");
+        down(&mut r, 2, (b[2] - 50, cy), 100);
+        mv(&mut r, 2, (b[2] + 124 * 6, cy), 120);
+        assert!(keys(&up(&mut r, 2, 140)).is_empty(), "6 mm off: cancelled");
+    }
+
+    #[test]
+    fn click_zone_thumb_drag_and_middle_chord_through_the_router() {
+        let mut cfg = RouterCfg::default();
+        cfg.chord_middle = true;
+        let mut r = Router::new(cfg, layout("full"));
+        r.set_geometry(geo());
+        let l = at(&r, "zone.left");
+        let rr = at(&r, "zone.right");
+        let mut o = down(&mut r, 1, l, 0);
+        o.extend(down(&mut r, 2, rr, 20));
+        let b: Vec<(u16, bool)> = pads(&o).into_iter().flat_map(|f| f.buttons).collect();
+        assert_eq!(b, vec![(crate::touchpad::BTN_MIDDLE, true)]);
+        up(&mut r, 1, 100);
+        let b: Vec<(u16, bool)> = pads(&up(&mut r, 2, 110)).into_iter().flat_map(|f| f.buttons).collect();
+        assert_eq!(b, vec![(crate::touchpad::BTN_MIDDLE, false)]);
+        // thumb on the left zone + a finger moving on the pad = drag (button first, then motion, button held)
+        let c = at(&r, "region.touchpad");
+        down(&mut r, 3, l, 1000);
+        let o = r.tick(1050);
+        assert!(pads(&o).iter().any(|f| f.buttons == vec![(crate::touchpad::BTN_LEFT, true)]));
+        down(&mut r, 4, c, 1100);
+        let o = mv(&mut r, 4, (c.0 + 2000, c.1), 1120);
+        assert!(pads(&o).iter().any(|f| f.slots[0].is_some()));
+        up(&mut r, 4, 1200);
+        let b: Vec<(u16, bool)> = pads(&up(&mut r, 3, 1300)).into_iter().flat_map(|f| f.buttons).collect();
+        assert_eq!(b, vec![(crate::touchpad::BTN_LEFT, false)]);
+    }
+
+    #[test]
+    fn scroll_inertia_after_lift_and_cancel_on_touch() {
+        let mut cfg = RouterCfg::default();
+        cfg.inertia.enabled = true;
+        let mut r = Router::new(cfg, layout("full"));
+        r.set_geometry(geo());
+        let c = at(&r, "region.touchpad");
+        let (a, b) = ((c.0 - 1000, c.1 + 2000), (c.0 + 1000, c.1 + 2000));
+        down(&mut r, 1, a, 0);
+        down(&mut r, 2, b, 0);
+        for s in 1..=8 {
+            // 200 native units (1.6 mm) per 8 ms = 200 mm/s upwards
+            mv(&mut r, 1, (a.0, a.1 - 200 * s), s as i64 * 8);
+            mv(&mut r, 2, (b.0, b.1 - 200 * s), s as i64 * 8);
+        }
+        up(&mut r, 1, 66);
+        let o = up(&mut r, 2, 68);
+        assert!(o.iter().any(|x| matches!(x, Out::Note(n) if n.contains("inertia"))));
+        let mut frames = vec![];
+        let mut t = 68;
+        for _ in 0..12 {
+            let Some(d) = r.next_deadline() else { break };
+            t = d;
+            frames.extend(pads(&r.tick(t)));
+        }
+        let two = frames.iter().filter(|f| f.slots.iter().filter(|s| s.is_some()).count() == 2).count();
+        assert!(two >= 10, "virtual fingers keep scrolling after the lift ({} frames)", two);
+        // a touch on a key stops it at once
+        let o = dn(&mut r, 3, "key.KEY_K", t + 1);
+        let f = pads(&o);
+        assert!(f.last().unwrap().slots.iter().all(|s| s.is_none()), "coast lifted");
+        assert!(o.iter().any(|x| matches!(x, Out::Note(n) if n.contains("inertia stopped"))));
+    }
+
+    #[test]
+    fn laptop_preset_geometry() {
+        let mut cfg = RouterCfg::default();
+        cfg.laptop = true;
+        let mut r = Router::new(cfg, layout("laptop"));
+        r.set_geometry(geo());
+        let m = r.model().clone();
+        assert!(m.laptop);
+        let ppm = m.px_per_mm;
+        let kb = m.regions.iter().find(|x| x.id == "keyboard").unwrap().rect;
+        let tp = m.regions.iter().find(|x| x.id == TOUCHPAD).unwrap().rect;
+        let pitch = kb.w / 15.0;
+        assert!(pitch <= 19.05 * ppm + 0.01, "pitch {} mm", pitch / ppm);
+        assert!(((kb.x + kb.w / 2.0) - m.w / 2.0).abs() < 1.0, "centred");
+        assert!((tp.w - kb.w).abs() < 1.0 && (tp.x - kb.x).abs() < 1.0, "pad width follows the keyboard");
+        assert!(tp.y > kb.bottom(), "pad below the keyboard");
+        // keys are square on the grid: a letter key is pitch wide and tall (minus the gap)
+        let q = m.keys.iter().find(|k| k.kind == KeyKind::Code(16)).unwrap().rect;
+        assert!((q.w - q.h).abs() < 1.0, "square keys {:?}", q);
+        // a very wide screen: not stretched (19.05 mm pitch), centred
+        let wide = Geometry { w: 3392.0, native_mm: (548.0, 193.0), ..geo() };
+        r.set_geometry(wide);
+        let m = r.model().clone();
+        let kb = m.regions.iter().find(|x| x.id == "keyboard").unwrap().rect;
+        assert!((kb.w / 15.0 - 19.05 * m.px_per_mm).abs() < 0.5, "max laptop pitch on a wide screen");
+        assert!(((kb.x + kb.w / 2.0) - m.w / 2.0).abs() < 1.0);
+        // edit mode from the preset starts from these rects and switches to free placement
+        let o = {
+            dn(&mut r, 1, "strip", 0);
+            r.tick(700)
+        };
+        assert!(o.contains(&Out::SetSetting("arrangement".into(), "free".into())));
+        assert!(r.editing());
+    }
+
+    #[test]
+    fn altgr_state_for_the_legends() {
+        let mut r = router("full");
+        dn(&mut r, 1, "key.KEY_RIGHTALT", 0);
+        assert!(r.model().altgr);
+        up(&mut r, 1, 50);
+        assert!(!r.model().altgr);
     }
 
     #[test]

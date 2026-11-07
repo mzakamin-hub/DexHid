@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# DexHid layout (M2.1): a laptop keyboard on a 15-unit grid (every row is 15 units wide), slim function row,
+# arrows in the bottom row. Meant for the "laptop" arrangement preset (square keys, at most 19.05 mm pitch, the
+# keyboard centred and the touchpad below it), works with free placement too.
+# Fn: hold Fn, or tap it to lock: 1-0 - = are F1-F12, arrows Home / End / PgUp / PgDn, Backspace = Delete.
+name = "laptop"
+title = "Laptop keyboard"
+description = "15-unit laptop grid: slim function row, arrows in the bottom row, Fn layer"
+
+[[part]]
+region = "keyboard"
+
+[[part.page]]
+id = "main"
+
+[[part.page.row]]
+height = 0.6
+optional = "function"
+keys = [
+  { key = "ESC", w = 1.5 },
+  { key = "F1" }, { key = "F2" }, { key = "F3" }, { key = "F4" },
+  { key = "F5" }, { key = "F6" }, { key = "F7" }, { key = "F8" },
+  { key = "F9" }, { key = "F10" }, { key = "F11" }, { key = "F12" },
+  { key = "DELETE", w = 1.5 },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "GRAVE" }, { key = "1" }, { key = "2" }, { key = "3" }, { key = "4" }, { key = "5" }, { key = "6" },
+  { key = "7" }, { key = "8" }, { key = "9" }, { key = "0" }, { key = "MINUS" }, { key = "EQUAL" },
+  { key = "BACKSPACE", w = 2 },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "TAB", w = 1.5 },
+  { key = "Q" }, { key = "W" }, { key = "E" }, { key = "R" }, { key = "T" },
+  { key = "Y" }, { key = "U" }, { key = "I" }, { key = "O" }, { key = "P" },
+  { key = "LEFTBRACE" }, { key = "RIGHTBRACE" }, { key = "BACKSLASH", w = 1.5 },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "CAPSLOCK", w = 1.75 },
+  { key = "A" }, { key = "S" }, { key = "D" }, { key = "F" }, { key = "G" },
+  { key = "H" }, { key = "J" }, { key = "K" }, { key = "L" },
+  { key = "SEMICOLON" }, { key = "APOSTROPHE" }, { key = "ENTER", w = 2.25 },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "LEFTSHIFT", w = 2.25 },
+  { key = "Z" }, { key = "X" }, { key = "C" }, { key = "V" }, { key = "B" }, { key = "N" }, { key = "M" },
+  { key = "COMMA" }, { key = "DOT" }, { key = "SLASH" },
+  { key = "RIGHTSHIFT", w = 2.75 },
+]
+
+[[part.page.row]]
+keys = [
+  { key = "LEFTCTRL", w = 1.25 }, { action = "fn", label = "Fn" }, { key = "LEFTMETA", w = 1.25 },
+  { key = "LEFTALT", w = 1.25 }, { key = "SPACE", w = 5 }, { key = "RIGHTALT", w = 1.25 },
+  { key = "LEFT" }, { key = "UP" }, { key = "DOWN" }, { key = "RIGHT" },
+]

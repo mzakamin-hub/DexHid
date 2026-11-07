@@ -21,6 +21,13 @@ pub enum Job {
     Restore,
     ThemeAuto,
     Click,
+    /// M2.1: move the Plasma panels of the internal screen to the external one (`test_target` = debug: with fewer
+    /// than two Plasma screens, "move" the panels onto their own screen so the script path runs without a monitor)
+    PanelsMove { internal: String, state: PathBuf, test_target: Option<i32> },
+    /// M2.1: put every panel back on the screen recorded in the state file (also after a crash, at start)
+    PanelsRestore { state: PathBuf, why: String },
+    /// M2.1: read the desktop look (KDE files) and, if wanted, the internal screen's wallpaper
+    DeskLook { internal: String, wallpaper: bool },
 }
 
 pub struct Worker {
@@ -54,6 +61,16 @@ impl Worker {
                             }
                             last_click = now;
                             play_click(&click);
+                        }
+                        Job::PanelsMove { internal, state, test_target } => sh.send(Cmd::Note(panels_move(&internal, &state, test_target))),
+                        Job::PanelsRestore { state, why } => {
+                            if let Some(r) = panels_restore(&state, &why) {
+                                sh.send(Cmd::Note(r));
+                            }
+                        }
+                        Job::DeskLook { internal, wallpaper } => {
+                            let (d, wp, note) = desk_look(&internal, wallpaper);
+                            sh.send(Cmd::DeskLook(d, wp, note));
                         }
                     }
                 }
@@ -311,4 +328,302 @@ pub fn kxkb_start(sh: SharedRef) {
             }
         }
     });
+}
+
+// ------------------------------------------------------------------ M2.1: Plasma panels follow the monitor
+
+/// run a Plasma desktop script (org.kde.PlasmaShell.evaluateScript); returns what the script print()ed
+fn plasma_eval(c: &Connection, script: &str) -> Result<String, String> {
+    let m = c
+        .call_method(Some("org.kde.plasmashell"), "/PlasmaShell", Some("org.kde.PlasmaShell"), "evaluateScript", &(script,))
+        .map_err(|e| format!("evaluateScript: {}", e.to_string().chars().take(160).collect::<String>()))?;
+    m.body().deserialize::<String>().map_err(|e| format!("evaluateScript reply: {}", e))
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct PlasmaLayout {
+    /// (Plasma screen id, [x, y, w, h])
+    pub screens: Vec<(i32, [i32; 4])>,
+    /// (panel id, screen, location)
+    pub panels: Vec<(i32, i32, String)>,
+}
+
+const LAYOUT_JS: &str = "var o={screens:[],panels:[]};for(var i=0;i<screenCount;i++){var g=screenGeometry(i);o.screens.push([i,g.x,g.y,g.width,g.height]);}var ps=panels();for(var j=0;j<ps.length;j++){o.panels.push([ps[j].id,ps[j].screen,ps[j].location]);}print(JSON.stringify(o));";
+
+/// parse the layout script output
+pub fn parse_layout(s: &str) -> Option<PlasmaLayout> {
+    let v: serde_json::Value = serde_json::from_str(s.trim()).ok()?;
+    let mut l = PlasmaLayout::default();
+    for sc in v.get("screens")?.as_array()? {
+        let a: Vec<i64> = sc.as_array()?.iter().filter_map(|x| x.as_i64()).collect();
+        if a.len() == 5 {
+            l.screens.push((a[0] as i32, [a[1] as i32, a[2] as i32, a[3] as i32, a[4] as i32]));
+        }
+    }
+    for p in v.get("panels")?.as_array()? {
+        let a = p.as_array()?;
+        l.panels.push((a.first()?.as_i64()? as i32, a.get(1)?.as_i64()? as i32, a.get(2).and_then(|x| x.as_str()).unwrap_or("").to_string()));
+    }
+    Some(l)
+}
+
+/// output name -> logical geometry from `kscreen-doctor -o` (ANSI colours stripped; one- or multi-line format)
+pub fn parse_kscreen(text: &str) -> Vec<(String, [i32; 4])> {
+    let mut clean = String::new();
+    let mut esc = false;
+    for ch in text.chars() {
+        if ch == '\u{1b}' {
+            esc = true;
+            continue;
+        }
+        if esc {
+            if ch.is_ascii_alphabetic() {
+                esc = false;
+            }
+            continue;
+        }
+        clean.push(ch);
+    }
+    let mut out = vec![];
+    for chunk in clean.split("Output:").skip(1) {
+        let name = chunk.split_whitespace().nth(1).unwrap_or("").to_string();
+        let Some(g) = chunk.split("Geometry:").nth(1) else { continue };
+        let mut it = g.split_whitespace();
+        let (Some(pos), Some(size)) = (it.next(), it.next()) else { continue };
+        let p: Vec<i32> = pos.split(',').filter_map(|x| x.parse().ok()).collect();
+        let s: Vec<i32> = size.split('x').filter_map(|x| x.parse().ok()).collect();
+        if p.len() == 2 && s.len() == 2 && !name.is_empty() {
+            out.push((name, [p[0], p[1], s[0], s[1]]));
+        }
+    }
+    out
+}
+
+fn is_internal(name: &str, internal: &str) -> bool {
+    if internal != "auto" && !internal.is_empty() {
+        return name == internal;
+    }
+    name.starts_with("DSI") || name.starts_with("eDP") || name.starts_with("LVDS")
+}
+
+/// (internal Plasma screen, external Plasma screen) from the layout + the kscreen names
+pub fn pick_screens(l: &PlasmaLayout, names: &[(String, [i32; 4])], internal: &str) -> Result<(i32, i32), String> {
+    if l.screens.len() < 2 {
+        return Err(format!("Plasma has {} screen(s)", l.screens.len()));
+    }
+    let name_of = |g: &[i32; 4]| names.iter().find(|(_, ng)| ng == g).or_else(|| names.iter().find(|(_, ng)| ng[0] == g[0] && ng[1] == g[1])).map(|n| n.0.clone());
+    let int = l.screens.iter().find(|(_, g)| name_of(g).is_some_and(|n| is_internal(&n, internal))).map(|s| s.0).ok_or("internal screen not found among the Plasma screens (kscreen-doctor missing?)")?;
+    let ext = l.screens.iter().find(|(i, _)| *i != int).map(|s| s.0).ok_or("no external Plasma screen")?;
+    Ok((int, ext))
+}
+
+fn set_screens_js(map: &[(i32, i32)]) -> String {
+    let m = map.iter().map(|(id, s)| format!("\"{}\":{}", id, s)).collect::<Vec<_>>().join(",");
+    format!("var M={{{}}};var r=[];var ps=panels();for(var i=0;i<ps.length;i++){{var p=ps[i];var t=M[String(p.id)];if(t!==undefined){{p.screen=t;r.push(p.id+\":\"+p.screen);}}}}print(r.join(\",\"));", m)
+}
+
+fn plasma_layout(c: &Connection) -> Result<PlasmaLayout, String> {
+    let s = plasma_eval(c, LAYOUT_JS)?;
+    parse_layout(&s).ok_or_else(|| format!("layout script output not understood: {}", s.chars().take(120).collect::<String>()))
+}
+
+fn kscreen_names() -> Vec<(String, [i32; 4])> {
+    std::process::Command::new("kscreen-doctor")
+        .arg("-o")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .map(|o| parse_kscreen(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
+}
+
+/// move the panels of the internal screen to the external one; their old screens go to `state` first
+pub fn panels_move(internal: &str, state: &Path, test_target: Option<i32>) -> String {
+    let c = match Connection::session() {
+        Ok(c) => c,
+        Err(e) => return format!("PANELS skip: no session bus ({})", e),
+    };
+    let l = match plasma_layout(&c) {
+        Ok(l) => l,
+        Err(e) => return format!("PANELS skip: not Plasma or scripting refused ({})", e),
+    };
+    if l.panels.is_empty() {
+        return "PANELS none: the session has no panels".into();
+    }
+    // test mode (Some): with fewer than two Plasma screens, a same-screen "move" of the first panel's screen
+    let test_same = test_target.is_some() && l.screens.len() < 2;
+    let (int, ext) = if test_same {
+        let s = l.panels[0].1;
+        (s, s)
+    } else {
+        match pick_screens(&l, &kscreen_names(), internal) {
+            Ok(x) => x,
+            Err(e) => return format!("PANELS skip: {}", e),
+        }
+    };
+    let moving: Vec<(i32, i32)> = l.panels.iter().filter(|p| p.1 == int).map(|p| (p.0, p.1)).collect();
+    if moving.is_empty() {
+        return format!("PANELS none on the internal screen {} (panels: {:?})", int, l.panels);
+    }
+    // the restore record first: a crash after this point is undone at the next start
+    let rec = serde_json::json!({ "panels": moving.iter().map(|(i, s)| [*i, *s]).collect::<Vec<_>>() });
+    if let Some(d) = state.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    if let Err(e) = std::fs::write(state, rec.to_string()) {
+        return format!("PANELS skip: state file {}: {}", state.display(), e);
+    }
+    let map: Vec<(i32, i32)> = moving.iter().map(|(i, _)| (*i, ext)).collect();
+    match plasma_eval(&c, &set_screens_js(&map)) {
+        Ok(r) => format!(
+            "PANELS moved t={} from={} to={} panels={} result={}{}",
+            crate::sys::mono_ms(),
+            int,
+            ext,
+            moving.len(),
+            r.trim(),
+            if test_same { " (test: one Plasma screen, same-screen move)" } else { "" }
+        ),
+        Err(e) => format!("PANELS move failed: {} (state kept for the restore)", e),
+    }
+}
+
+/// put the panels back from `state`; None = nothing recorded
+pub fn panels_restore(state: &Path, why: &str) -> Option<String> {
+    let s = std::fs::read_to_string(state).ok()?;
+    let v: serde_json::Value = match serde_json::from_str(&s) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = std::fs::remove_file(state);
+            return Some("PANELS bad state file removed".into());
+        }
+    };
+    let map: Vec<(i32, i32)> = v
+        .get("panels")
+        .and_then(|p| p.as_array())
+        .map(|a| a.iter().filter_map(|x| Some((x.get(0)?.as_i64()? as i32, x.get(1)?.as_i64()? as i32))).collect())
+        .unwrap_or_default();
+    let c = match Connection::session() {
+        Ok(c) => c,
+        Err(e) => return Some(format!("PANELS restore failed: no session bus ({}); state kept", e)),
+    };
+    match plasma_eval(&c, &set_screens_js(&map)) {
+        Ok(r) => {
+            // read back: every recorded panel on its old screen again
+            let ok = plasma_layout(&c).map(|l| map.iter().all(|(id, sc)| l.panels.iter().any(|p| p.0 == *id && p.1 == *sc))).unwrap_or(false);
+            if ok {
+                let _ = std::fs::remove_file(state);
+            }
+            Some(format!("PANELS restored t={} why={} panels={} result={} verified={}", crate::sys::mono_ms(), why, map.len(), r.trim(), ok))
+        }
+        Err(e) => Some(format!("PANELS restore failed: {} (state kept)", e)),
+    }
+}
+
+// ------------------------------------------------------------------ M2.1: the desktop look
+
+fn kde_cfg(name: &str) -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    std::fs::read_to_string(Path::new(&home).join(".config").join(name)).ok()
+}
+
+/// the KDE look + the internal screen's wallpaper (when wanted); the third value is a log line
+pub fn desk_look(internal: &str, want_wallpaper: bool) -> (Option<dexhid_core::feedback::DeskLook>, String, String) {
+    let Some(kg) = kde_cfg("kdeglobals") else { return (None, String::new(), "THEME-DESKTOP no kdeglobals: built-in theme".into()) };
+    let radius = ["klassyrc", "breezerc"].iter().find_map(|f| {
+        let m = dexhid_core::feedback::parse_ini(&kde_cfg(f)?);
+        m.iter().find(|((_, k), _)| k == "WindowCornerRadius" || k == "CornerRadius").and_then(|(_, v)| v.parse::<f32>().ok())
+    });
+    let d = dexhid_core::feedback::desk_look(&kg, kde_cfg("plasmashellrc").as_deref(), kde_cfg("kwinrc").as_deref(), radius);
+    let mut wp = String::new();
+    let mut wnote = String::from("off");
+    if want_wallpaper && d.is_some() {
+        match wallpaper_of_internal(internal) {
+            Ok(p) => {
+                wnote = "found".into();
+                wp = p;
+            }
+            Err(e) => wnote = e,
+        }
+    }
+    let note = match &d {
+        Some(x) => format!(
+            "THEME-DESKTOP scheme={} window=#{:06x} view=#{:06x} button=#{:06x} accent=#{:06x} translucent={} blur={} radius_mm={:.1} wallpaper={}",
+            if x.scheme.is_empty() { "-" } else { &x.scheme },
+            x.window & 0xffffff,
+            x.view & 0xffffff,
+            x.button & 0xffffff,
+            x.accent & 0xffffff,
+            x.translucent,
+            x.blur,
+            x.radius_mm,
+            wnote
+        ),
+        None => "THEME-DESKTOP kdeglobals has no colour scheme colours: built-in theme".into(),
+    };
+    (d, wp, note)
+}
+
+const WALL_JS: &str = "var o=[];for(var i=0;i<screenCount;i++){var d=desktopForScreen(i);if(!d)continue;d.currentConfigGroup=[\"Wallpaper\",\"org.kde.image\",\"General\"];o.push([i,d.wallpaperPlugin,d.readConfig(\"Image\",\"\")]);}print(JSON.stringify(o));";
+
+fn wallpaper_of_internal(internal: &str) -> Result<String, String> {
+    let c = Connection::session().map_err(|e| format!("no session bus ({})", e))?;
+    let l = plasma_layout(&c)?;
+    let int = if l.screens.len() == 1 { l.screens[0].0 } else { pick_screens(&l, &kscreen_names(), internal)?.0 };
+    let s = plasma_eval(&c, WALL_JS)?;
+    let v: serde_json::Value = serde_json::from_str(s.trim()).map_err(|_| "wallpaper script output not understood".to_string())?;
+    for e in v.as_array().cloned().unwrap_or_default() {
+        if e.get(0).and_then(|x| x.as_i64()) == Some(int as i64) {
+            let plugin = e.get(1).and_then(|x| x.as_str()).unwrap_or("");
+            let img = e.get(2).and_then(|x| x.as_str()).unwrap_or("");
+            if plugin != "org.kde.image" {
+                return Err(format!("wallpaper plugin {} (only org.kde.image)", plugin));
+            }
+            if img.is_empty() {
+                // Plasma leaves the default unset: the default package
+                for d in ["/usr/share/wallpapers/Next", "/usr/share/wallpapers/Fedora"] {
+                    if Path::new(d).is_dir() {
+                        return Ok(d.into());
+                    }
+                }
+                return Err("no Image set and no default package".into());
+            }
+            return Ok(img.to_string());
+        }
+    }
+    Err(format!("no desktop for screen {}", int))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plasma_layout_kscreen_and_screen_pick() {
+        let l = parse_layout("{\"screens\":[[0,0,0,1696,1200],[1,1696,0,2560,1440]],\"panels\":[[2,0,\"bottom\"],[40,1,\"top\"]]}\n").unwrap();
+        assert_eq!(l.screens.len(), 2);
+        assert_eq!(l.panels[0], (2, 0, "bottom".to_string()));
+        let ks = "\u{1b}[01;32mOutput: \u{1b}[0;0m1 DSI-1 enabled connected priority 2 Panel\n\tGeometry: 0,0 1696x1200\n\tScale: 1.6\nOutput: 2 DP-1 enabled connected priority 1\n\tGeometry: 1696,0 2560x1440\n";
+        let n = parse_kscreen(ks);
+        assert_eq!(n, vec![("DSI-1".to_string(), [0, 0, 1696, 1200]), ("DP-1".to_string(), [1696, 0, 2560, 1440])]);
+        assert_eq!(pick_screens(&l, &n, "auto").unwrap(), (0, 1));
+        assert_eq!(pick_screens(&l, &n, "DP-1").unwrap(), (1, 0), "explicit internal name");
+        let one = PlasmaLayout { screens: vec![(0, [0, 0, 1696, 1200])], panels: vec![] };
+        assert!(pick_screens(&one, &n, "auto").unwrap_err().contains("1 screen"));
+        let js = set_screens_js(&[(2, 1), (7, 1)]);
+        assert!(js.contains("var M={\"2\":1,\"7\":1}") && js.contains("p.screen=t"));
+    }
+
+    #[test]
+    fn restore_state_file_without_plasma() {
+        let d = std::env::temp_dir().join(format!("dexhid-panels-{}", std::process::id()));
+        let f = d.join("panels.json");
+        assert!(panels_restore(&f, "start").is_none(), "nothing recorded: no-op");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(&f, "not json").unwrap();
+        assert!(panels_restore(&f, "start").unwrap().contains("bad state"));
+        assert!(!f.exists());
+        std::fs::remove_dir_all(&d).ok();
+    }
 }

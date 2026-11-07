@@ -62,6 +62,58 @@ pub fn file_name(layout: &str, o: Orientation) -> String {
     format!("arrangement-{}-{}.toml", layout, o.name())
 }
 
+/// laptop key pitch (mm): 19.05 mm = the common laptop / desktop key spacing
+pub const LAPTOP_PITCH_MM: f32 = 19.05;
+/// the laptop grid is at least 15 key units wide
+pub const LAPTOP_UNITS: f32 = 15.0;
+
+/// M2.1 "laptop" preset (fractions of `area`): square keys of one pitch (at most LAPTOP_PITCH_MM, and so that a
+/// grid of at least 15 units fits the width), the keyboard (+ numpad half a unit to its right) centred under the
+/// strip instead of stretched, at most 62 % of the height; the touchpad below, centred, `pad_pct` % of the
+/// keyboard width; the quick bar in the free column left of a narrower pad, else as a row above the pad.
+/// `kb` / `np` = (width, height) in key units.
+pub fn laptop(area: &Rect, ppm: f32, kb: (f32, f32), np: Option<(f32, f32)>, quick: bool, pad_pct: f32) -> Arrangement {
+    let m = 2.0 * ppm;
+    let total_u = kb.0 + np.map(|n| n.0 + 0.5).unwrap_or(0.0);
+    let mut pitch = (LAPTOP_PITCH_MM * ppm).min((area.w - 2.0 * m) / total_u.max(LAPTOP_UNITS));
+    let rows = kb.1.max(np.map(|n| n.1).unwrap_or(0.0)).max(1.0);
+    if rows * pitch > area.h * 0.62 {
+        pitch = area.h * 0.62 / rows;
+    }
+    let kb_w = kb.0 * pitch;
+    let kb_h = kb.1 * pitch;
+    let x0 = area.x + (area.w - total_u * pitch) / 2.0;
+    let y0 = area.y + m;
+    let mut v: Vec<(&str, Rect)> = vec![("keyboard", Rect::new(x0, y0, kb_w, kb_h))];
+    if let Some(n) = np {
+        v.push(("numpad", Rect::new(x0 + kb_w + 0.5 * pitch, y0, n.0 * pitch, n.1 * pitch)));
+    }
+    let py = y0 + rows * pitch + 2.0 * m;
+    let pw = kb_w * pad_pct.clamp(20.0, 100.0) / 100.0;
+    let mut pad = Rect::new(x0 + (kb_w - pw) / 2.0, py, pw, (area.bottom() - m - py).max(10.0 * ppm));
+    if quick {
+        let col = pad.x - x0 - m;
+        if col >= 14.0 * ppm {
+            v.push((QUICK, Rect::new(x0, pad.y, col, pad.h)));
+        } else {
+            let qh = 9.0 * ppm;
+            v.push((QUICK, Rect::new(pad.x, pad.y, pad.w, qh)));
+            pad.y += qh + m;
+            pad.h -= qh + m;
+        }
+    }
+    v.push((TOUCHPAD, pad));
+    Arrangement {
+        version: 1,
+        layout: String::new(),
+        orientation: String::new(),
+        regions: v.into_iter().map(|(id, r)| {
+            let f = r.to_frac(area);
+            RegionPlace { id: id.into(), x: f.x, y: f.y, w: f.w, h: f.h }
+        }).collect(),
+    }
+}
+
 impl Arrangement {
     /// default placement for the given keyboard regions (the touchpad is always present)
     pub fn default_for(layout: &str, kb_regions: &[String], o: Orientation) -> Arrangement {

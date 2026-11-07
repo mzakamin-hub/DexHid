@@ -16,5 +16,6 @@ pub mod keys;
 pub mod layout;
 pub mod mt;
 pub mod router;
+pub mod swipe;
 pub mod state;
 pub mod touchpad;

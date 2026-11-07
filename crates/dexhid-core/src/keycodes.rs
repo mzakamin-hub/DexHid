@@ -95,6 +95,8 @@ const TABLE: &[(&str, u16, &str, &str)] = &[
     ("KPSLASH", 98, "/", ""),
     ("SYSRQ", 99, "Print", ""),
     ("RIGHTALT", 100, "AltGr", ""),
+    // M2.1: the neutral "mask" key for cancelled modifiers (xkeyboard-config maps <I248> to nothing)
+    ("UNKNOWN", 240, "", ""),
     ("HOME", 102, "Home", ""),
     ("UP", 103, "\u{2191}", ""),
     ("PAGEUP", 104, "PgUp", ""),

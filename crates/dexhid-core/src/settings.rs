@@ -69,6 +69,9 @@ pub const DEFS: &[Def] = &[
     Def { key: "status_info", module: "general", title: "Battery / display info in the bar", kind: Kind::Bool },
     Def { key: "pad_only_with_physical_keyboard", module: "general", title: "Touchpad only when a keyboard is attached", kind: Kind::Bool },
     Def { key: "track_layout", module: "general", title: "Legends follow the desktop layout", kind: Kind::Bool },
+    Def { key: "arrangement", module: "general", title: "Arrangement", kind: Kind::Choice(&["free", "laptop"]) },
+    Def { key: "laptop_pad_width", module: "general", title: "Laptop: touchpad width (% of keyboard)", kind: Kind::Num { min: 40.0, max: 100.0, step: 5.0, int: true } },
+    Def { key: "panels_follow", module: "general", title: "Move desktop panels to the monitor (KDE)", kind: Kind::Bool },
     // pointer
     Def { key: "mode", module: "pointer", title: "Mode", kind: Kind::Choice(&["touchpad", "mouse"]) },
     Def { key: "speed", module: "pointer", title: "Pointer speed (DexHid)", kind: Kind::Num { min: 0.4, max: 3.0, step: 0.1, int: false } },
@@ -76,10 +79,17 @@ pub const DEFS: &[Def] = &[
     Def { key: "natural_scroll", module: "pointer", title: "Natural scrolling", kind: Kind::Bool },
     Def { key: "tap_to_click", module: "pointer", title: "Tap to click", kind: Kind::Bool },
     Def { key: "right_click", module: "pointer", title: "Right click", kind: Kind::Choice(&["zones+tap", "tap", "zones"]) },
+    Def { key: "zone_chord_middle", module: "pointer", title: "Both click zones = middle click", kind: Kind::Bool },
+    Def { key: "swipe_gestures", module: "pointer", title: "3/4-finger swipes anywhere on the panel", kind: Kind::Bool },
+    Def { key: "swipe_min_mm", module: "pointer", title: "Swipe: travel before it starts (mm)", kind: Kind::Num { min: 4.0, max: 20.0, step: 1.0, int: false } },
+    Def { key: "scroll_inertia", module: "pointer", title: "Two-finger scroll inertia", kind: Kind::Bool },
+    Def { key: "inertia_friction", module: "pointer", title: "Inertia friction", kind: Kind::Num { min: 1.0, max: 10.0, step: 0.5, int: false } },
     // keyboard
     Def { key: "sticky_modifiers", module: "keyboard", title: "Sticky modifiers", kind: Kind::Bool },
     Def { key: "long_press_ms", module: "keyboard", title: "Long press for alternates (ms)", kind: Kind::Num { min: 250.0, max: 1000.0, step: 50.0, int: true } },
     Def { key: "hold_ms", module: "keyboard", title: "Hold before a key repeats (ms)", kind: Kind::Num { min: 80.0, max: 600.0, step: 10.0, int: true } },
+    Def { key: "key_slop_mm", module: "keyboard", title: "Finger wobble allowed on a key (mm)", kind: Kind::Num { min: 1.0, max: 8.0, step: 0.5, int: false } },
+    Def { key: "modifier_mask", module: "keyboard", title: "Cancelled modifier: mask key", kind: Kind::Choice(&["UNKNOWN", "F24", "off"]) },
     Def { key: "opt.function", module: "keyboard", title: "Function key row", kind: Kind::Bool },
     Def { key: "opt.numpad", module: "keyboard", title: "Numeric keypad", kind: Kind::Bool },
     // quick actions (the per-action rows are generated from quick::BUILTIN)
@@ -87,7 +97,8 @@ pub const DEFS: &[Def] = &[
     // look
     Def { key: "dim", module: "look", title: "Dim the tablet panel in pad mode", kind: Kind::Bool },
     Def { key: "dim_percent", module: "look", title: "Dim to (% of max)", kind: Kind::Num { min: 5.0, max: 80.0, step: 5.0, int: true } },
-    Def { key: "theme", module: "look", title: "Theme", kind: Kind::Choice(&["dark", "light", "amoled", "auto"]) },
+    Def { key: "theme", module: "look", title: "Theme", kind: Kind::Choice(&["desktop", "dark", "light", "amoled", "auto"]) },
+    Def { key: "wallpaper", module: "look", title: "Desktop wallpaper behind the keys", kind: Kind::Bool },
     Def { key: "accent", module: "look", title: "Accent colour", kind: Kind::Choice(&["#4a8be0", "#e0a030", "#40b070", "#d05a8a", "#9a7ae0"]) },
     Def { key: "key_alpha", module: "look", title: "Key opacity (%)", kind: Kind::Num { min: 30.0, max: 100.0, step: 10.0, int: true } },
     // palm
@@ -285,8 +296,8 @@ mod tests {
         let b = def("natural_scroll").unwrap();
         assert_eq!(step(b, Some(&Value::Boolean(false)), 1), Some(Value::Boolean(true)));
         let c = def("theme").unwrap();
-        assert_eq!(step(c, Some(&Value::String("auto".into())), 1), Some(Value::String("dark".into())), "cycles");
-        assert_eq!(step(c, Some(&Value::String("dark".into())), -1), Some(Value::String("auto".into())));
+        assert_eq!(step(c, Some(&Value::String("auto".into())), 1), Some(Value::String("desktop".into())), "cycles");
+        assert_eq!(step(c, Some(&Value::String("desktop".into())), -1), Some(Value::String("auto".into())));
         let n = def("speed").unwrap();
         assert_eq!(step(n, Some(&Value::Float(2.95)), 1), Some(Value::Float(3.0)), "clamped");
         assert_eq!(parse(n, "1.25").unwrap(), Value::Float(1.25));

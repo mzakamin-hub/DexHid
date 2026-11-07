@@ -75,6 +75,15 @@ pub fn router_cfg(cfg: &Config, res: i32) -> RouterCfg {
         dwt_ms: cfg.dwt_ms,
         pen_pause: cfg.pen_pause,
         quick: cfg.quick_actions.enabled,
+        // M2.1
+        key_slop_mm: cfg.key_slop_mm,
+        mask_key: if cfg.modifier_mask == "off" { None } else { keycodes::code(&cfg.modifier_mask) },
+        swipe: cfg.swipe_gestures && cfg.mode != "mouse",
+        swipe_min_mm: cfg.swipe_min_mm,
+        chord_middle: cfg.zone_chord_middle,
+        inertia: dexhid_core::touchpad::Inertia { enabled: cfg.scroll_inertia && cfg.mode != "mouse", friction: cfg.inertia_friction, ..Default::default() },
+        laptop: cfg.arrangement == "laptop",
+        laptop_pad_pct: cfg.laptop_pad_width as f32,
         ..RouterCfg::default()
     }
 }
@@ -140,6 +149,10 @@ struct D {
     leds: (bool, bool),
     theme_auto: String,
     guard_respawn_at: Option<i64>,
+    // M2.1
+    panels_moved: bool,
+    desk: Option<dexhid_core::feedback::DeskLook>,
+    desk_wallpaper: String,
 }
 
 pub fn run(opts: Opts) -> i32 {
@@ -375,9 +388,14 @@ pub fn run(opts: Opts) -> i32 {
         leds: (false, false),
         theme_auto: "dark".into(),
         guard_respawn_at: None,
+        panels_moved: false,
+        desk: None,
+        desk_wallpaper: String::new(),
         cfg,
         opts,
     };
+    // M2.1: panels a crashed run left on the monitor come back first
+    d.worker.send(Job::PanelsRestore { state: crate::panels_state(), why: "left over".into() });
     println!("CONFIG autostart={} keyboard={} internal_output={} connectors={:?} watchdog_ms={:?} mode={} quick={}", d.machine.autostart.name(), d.router.layout().name, d.cfg.internal_output, d.cfg.external_connectors, d.notify.watchdog_ms, d.cfg.mode, d.cfg.quick_actions.enabled);
     d.apply_config(None);
     d.scan_inputs();
@@ -574,12 +592,22 @@ impl D {
         let o = self.router.set_quick(items.iter().map(|i| (i.id.clone(), i.label.clone(), i.size)).collect());
         self.quick = items;
         self.apply(o);
-        let theme = if self.cfg.theme == "auto" { self.theme_auto.clone() } else { self.cfg.theme.clone() };
-        if self.cfg.theme == "auto" && old.as_ref().is_none_or(|o| o.theme != "auto") {
+        if matches!(self.cfg.theme.as_str(), "auto" | "desktop") && old.as_ref().is_none_or(|o| o.theme != self.cfg.theme) {
             self.worker.send(Job::ThemeAuto);
         }
-        let o = self.router.set_theme(&theme, &self.cfg.accent, self.cfg.key_alpha);
-        self.apply(o);
+        // M2.1: the desktop look (re-read when the theme / wallpaper setting changes, and at every grab)
+        if self.cfg.theme == "desktop" && old.as_ref().is_none_or(|o| o.theme != "desktop" || o.wallpaper != self.cfg.wallpaper) {
+            self.worker.send(Job::DeskLook { internal: self.cfg.internal_output.clone(), wallpaper: self.cfg.wallpaper });
+        }
+        self.apply_theme();
+        if let Some(o) = &old {
+            if o.panels_follow && !self.cfg.panels_follow && self.panels_moved {
+                self.panels_back("setting off");
+            }
+            if !o.panels_follow && self.cfg.panels_follow && self.grabbed {
+                self.panels_out();
+            }
+        }
         if !self.cfg.status_info {
             let o = self.router.set_info("");
             self.apply(o);
@@ -603,6 +631,41 @@ impl D {
             if old.pad_only_with_physical_keyboard != self.cfg.pad_only_with_physical_keyboard {
                 self.update_pad_only();
             }
+        }
+    }
+
+    /// the theme the router draws: "desktop" needs the KDE look (else the light / dark preference), "auto" the
+    /// preference
+    fn apply_theme(&mut self) {
+        let theme = match self.cfg.theme.as_str() {
+            "auto" => self.theme_auto.clone(),
+            "desktop" if self.desk.is_some() => "desktop".to_string(),
+            "desktop" => self.theme_auto.clone(),
+            t => t.to_string(),
+        };
+        let desktop = self.cfg.theme == "desktop";
+        let o = self.router.set_look(if desktop { self.desk.clone() } else { None }, if desktop && self.cfg.wallpaper { &self.desk_wallpaper } else { "" });
+        self.apply(o);
+        let o = self.router.set_theme(&theme, &self.cfg.accent, self.cfg.key_alpha);
+        self.apply(o);
+    }
+
+    /// M2.1: Plasma panels to the monitor (KDE only; other desktops: the worker logs a skip)
+    fn panels_out(&mut self) {
+        if !self.cfg.panels_follow || self.panels_moved {
+            return;
+        }
+        // debug + DEXHID_PANELS_TEST=1: with fewer than two Plasma screens the panels are "moved" onto their own screen
+        // (the script, state file and restore paths run without a monitor)
+        let test_target = if self.opts.debug && std::env::var("DEXHID_PANELS_TEST").as_deref() == Ok("1") { Some(-1) } else { None };
+        self.worker.send(Job::PanelsMove { internal: self.cfg.internal_output.clone(), state: crate::panels_state(), test_target });
+        self.panels_moved = true;
+    }
+
+    fn panels_back(&mut self, why: &str) {
+        if self.panels_moved {
+            self.panels_moved = false;
+            self.worker.send(Job::PanelsRestore { state: crate::panels_state(), why: why.into() });
         }
     }
 
@@ -842,10 +905,13 @@ impl D {
             Cmd::ThemeAuto(t) => {
                 println!("THEME auto -> {}", t);
                 self.theme_auto = t;
-                if self.cfg.theme == "auto" {
-                    let o = self.router.set_theme(&self.theme_auto.clone(), &self.cfg.accent.clone(), self.cfg.key_alpha);
-                    self.apply(o);
-                }
+                self.apply_theme();
+            }
+            Cmd::DeskLook(d, wp, note) => {
+                println!("{} t={}", note, mono_ms());
+                self.desk = d;
+                self.desk_wallpaper = wp;
+                self.apply_theme();
             }
         }
     }
@@ -1008,6 +1074,12 @@ impl D {
                     let outs = self.router.set_arrangement(a);
                     self.apply(outs);
                 }
+                Out::Swipe(s) => println!("SWIPE t={} {}", mono_ms(), s),
+                Out::SetSetting(k, v) => {
+                    if let Err(e) = self.set_setting(&k, Some(&v), 0) {
+                        println!("SETTING-REJECTED key={} ({})", k, e);
+                    }
+                }
                 Out::EditMode(b) => println!("EDIT t={} on={}", mono_ms(), b),
                 Out::PanelOpen(b) => println!("PANEL t={} open={}", mono_ms(), b),
                 Out::Static | Out::Dynamic => self.model_dirty = true,
@@ -1093,6 +1165,7 @@ impl D {
         }
         self.kb_destroy();
         self.set_dim(false);
+        self.panels_back("release");
     }
 
     /// make the devices / grab / UI match the state machine
@@ -1158,6 +1231,11 @@ impl D {
                             println!("GRABBED t={} dev={} reason={} slot={}", mono_ms(), tpath, self.reason, cur);
                             self.print_geom();
                             self.set_dim(true);
+                            // M2.1: panels to the monitor, the desktop look re-read (it may have changed)
+                            self.panels_out();
+                            if self.cfg.theme == "desktop" {
+                                self.worker.send(Job::DeskLook { internal: self.cfg.internal_output.clone(), wallpaper: self.cfg.wallpaper });
+                            }
                         }
                         Err(err) => {
                             println!("ERROR EVIOCGRAB {}: {}", tpath, strerr(err));
@@ -1249,6 +1327,11 @@ impl D {
             "quick": self.quick.iter().map(|q| q.id.clone()).collect::<Vec<_>>(),
             "dimmed": self.dimmed,
             "theme": self.router.model().theme.0,
+            "swipe": format!("{:?}", self.router.swipe_phase()).to_lowercase(),
+            "arrangement": if self.router.model().laptop { "laptop" } else { "free" },
+            "panels_moved": self.panels_moved,
+            "desk_scheme": self.desk.as_ref().map(|d| d.scheme.clone()),
+            "wallpaper": !self.router.model().wallpaper.is_empty(),
         })
         .to_string();
         if s != self.status {
@@ -1264,6 +1347,10 @@ impl D {
                 self.reason = stop_reason();
                 self.release();
                 self.notify.send("STOPPING=1");
+                // M2.1: the panels go back before the process ends (the worker may not get to it)
+                if let Some(r) = desktop::panels_restore(&crate::panels_state(), "exit") {
+                    println!("{}", r);
+                }
                 println!("EXIT t={} reason={}", mono_ms(), self.reason);
                 // the restore runs in the worker: give it a moment (ExecStopPost=dexhid --restore covers the rest)
                 if self.cfg.dim {
@@ -1351,6 +1438,14 @@ impl D {
                             println!("WARN SYN_DROPPED: lifting all contacts");
                         }
                         for c in self.mt.feed(ev.type_, ev.code, ev.value) {
+                            if self.opts.debug {
+                                // M2.1: touch down / up times for the runner's key-lifecycle timing checks
+                                match c {
+                                    dexhid_core::mt::Contact::Down { id, .. } => println!("TOUCH t={} down id={}", now, id),
+                                    dexhid_core::mt::Contact::Up { id } => println!("TOUCH t={} up id={}", now, id),
+                                    _ => {}
+                                }
+                            }
                             outs.extend(self.router.contact(c, now));
                         }
                     }

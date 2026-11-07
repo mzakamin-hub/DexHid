@@ -172,6 +172,123 @@ pub fn palette(theme: &str, accent: &str, key_alpha: u32) -> Palette {
     p
 }
 
+/// M2.1: the desktop's look (KDE: kdeglobals colours, the panel opacity / blur preference, a corner radius)
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct DeskLook {
+    /// colour scheme name ([General] ColorScheme)
+    pub scheme: String,
+    pub window: u32,
+    pub view: u32,
+    pub button: u32,
+    pub text: u32,
+    pub text_dim: u32,
+    pub accent: u32,
+    /// panels translucent (plasmashellrc panelOpacity 0 = adaptive or 2 = translucent)
+    pub translucent: bool,
+    /// KWin blur effect on
+    pub blur: bool,
+    /// corner radius (mm)
+    pub radius_mm: f32,
+}
+
+/// INI-style config (KConfig): (group, key) -> value; nested groups are joined as "A][B"
+pub fn parse_ini(text: &str) -> std::collections::HashMap<(String, String), String> {
+    let mut m = std::collections::HashMap::new();
+    let mut g = String::new();
+    for l in text.lines() {
+        let l = l.trim();
+        if l.starts_with('[') && l.ends_with(']') {
+            g = l[1..l.len() - 1].to_string();
+        } else if let Some((k, v)) = l.split_once('=') {
+            if !l.starts_with('#') {
+                // drop KConfig flags like Key[$e]
+                let k = k.trim().split('[').next().unwrap_or("").to_string();
+                m.insert((g.clone(), k), v.trim().to_string());
+            }
+        }
+    }
+    m
+}
+
+fn kcolor(v: &str) -> Option<u32> {
+    if v.starts_with('#') {
+        return parse_rgb(v);
+    }
+    let p: Vec<u32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+    if p.len() < 3 {
+        return None;
+    }
+    Some(0xff00_0000 | (p[0].min(255) << 16) | (p[1].min(255) << 8) | p[2].min(255))
+}
+
+/// mix two colours: `t` = share of `b` (0..1), opaque result
+pub fn mix(a: u32, b: u32, t: f32) -> u32 {
+    let ch = |s: u32| -> u32 {
+        let x = ((a >> s) & 255) as f32;
+        let y = ((b >> s) & 255) as f32;
+        ((x + (y - x) * t).round() as u32).min(255) << s
+    };
+    0xff00_0000 | ch(16) | ch(8) | ch(0)
+}
+
+/// the desktop look from KDE's files (kdeglobals text, plasmashellrc / kwinrc text if present, a decoration corner
+/// radius in px if one is configured). None = no colour scheme colours in kdeglobals.
+pub fn desk_look(kdeglobals: &str, plasmashellrc: Option<&str>, kwinrc: Option<&str>, radius_px: Option<f32>) -> Option<DeskLook> {
+    let k = parse_ini(kdeglobals);
+    let c = |g: &str, key: &str| k.get(&(g.to_string(), key.to_string())).and_then(|v| kcolor(v));
+    let window = c("Colors:Window", "BackgroundNormal")?;
+    let text = c("Colors:Window", "ForegroundNormal").unwrap_or(0xffe8ecf2);
+    let accent = c("General", "AccentColor").or_else(|| c("Colors:Selection", "BackgroundNormal")).unwrap_or(0xff3daee9);
+    let translucent = plasmashellrc.map(parse_ini).map(|p| p.iter().any(|((g, key), v)| g.starts_with("PlasmaViews][Panel") && key == "panelOpacity" && (v == "0" || v == "2"))).unwrap_or(true);
+    let blur = kwinrc.map(parse_ini).and_then(|p| p.get(&("Plugins".to_string(), "blurEnabled".to_string())).cloned()).map(|v| v != "false").unwrap_or(true);
+    Some(DeskLook {
+        scheme: k.get(&("General".to_string(), "ColorScheme".to_string())).cloned().unwrap_or_default(),
+        window,
+        view: c("Colors:View", "BackgroundNormal").unwrap_or(window),
+        button: c("Colors:Button", "BackgroundNormal").unwrap_or(window),
+        text,
+        text_dim: c("Colors:Window", "ForegroundInactive").unwrap_or_else(|| mix(text, window, 0.45)),
+        accent,
+        translucent,
+        blur,
+        // px at 96 dpi -> mm; Breeze's default corner is about 5 px
+        radius_mm: radius_px.unwrap_or(5.0) * 25.4 / 96.0,
+    })
+}
+
+/// a palette from the desktop look (theme "desktop")
+pub fn palette_desk(d: &DeskLook, key_alpha: u32) -> Palette {
+    let mut p = Palette {
+        bg: mix(d.window, 0xff00_0000, 0.12),
+        strip: d.window,
+        btn: d.button,
+        key: d.button,
+        key_mod: mix(d.button, d.window, 0.5),
+        pad: d.view,
+        pad_edge: mix(d.view, d.text, 0.22),
+        zone: mix(d.view, d.button, 0.5),
+        text: d.text,
+        text_dim: d.text_dim,
+        accent: d.accent,
+        edit: 0xffe0a030,
+        card: (d.window & 0x00ff_ffff) | 0xf800_0000,
+    };
+    if d.translucent {
+        // the panel material: translucent surfaces over the (wallpaper) background
+        p.strip = (p.strip & 0x00ff_ffff) | 0xd800_0000;
+        p.pad = (p.pad & 0x00ff_ffff) | 0xd000_0000;
+        p.zone = (p.zone & 0x00ff_ffff) | 0xd000_0000;
+    }
+    if key_alpha < 100 {
+        p.key = with_alpha(p.key, key_alpha);
+        p.key_mod = with_alpha(p.key_mod, key_alpha);
+    } else if d.translucent {
+        p.key = (p.key & 0x00ff_ffff) | 0xe800_0000;
+        p.key_mod = (p.key_mod & 0x00ff_ffff) | 0xe000_0000;
+    }
+    p
+}
+
 /// does an input device look like a physical keyboard (a BT / USB keyboard or the keyboard cover)?
 /// `bus` = id bustype; virtual devices (BUS_VIRTUAL 0x06) and our own never count.
 pub fn is_physical_keyboard(name: &str, bus: u16, has_letters: bool) -> bool {
@@ -211,6 +328,32 @@ pub fn sysfs_keyboards(class_input: &Path) -> Vec<(String, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M2.1 item 9: the KDE look from kdeglobals / plasmashellrc / kwinrc
+    #[test]
+    fn desk_look_from_kde_files() {
+        let kg = "[General]\nColorScheme=BreezeDark\n\n[Colors:Window]\nBackgroundNormal=32,35,38\nForegroundNormal=252,252,252\n\n[Colors:View]\nBackgroundNormal=20,22,24\n\n[Colors:Button]\nBackgroundNormal=41,44,48\n\n[Colors:Selection]\nBackgroundNormal=61,174,233\n";
+        let ps = "[PlasmaViews][Panel 2]\nfloating=1\n\n[PlasmaViews][Panel 2][Defaults]\nthickness=44\n\n[PlasmaViews][Panel 2]\npanelOpacity=1\n";
+        let kw = "[Plugins]\nblurEnabled=false\n";
+        let d = desk_look(kg, Some(ps), Some(kw), Some(10.0)).unwrap();
+        assert_eq!(d.scheme, "BreezeDark");
+        assert_eq!(d.window, 0xff202326);
+        assert_eq!(d.view, 0xff141618);
+        assert_eq!(d.button, 0xff292c30);
+        assert_eq!(d.accent, 0xff3daee9, "selection colour without an AccentColor");
+        assert!(!d.translucent && !d.blur, "opaque panel, blur off");
+        assert!((d.radius_mm - 2.646).abs() < 0.01);
+        let p = palette_desk(&d, 100);
+        assert_eq!(p.strip, 0xff202326);
+        assert_eq!(p.text, 0xfffcfcfc);
+        // AccentColor wins, translucent panels make the surfaces translucent
+        let kg2 = format!("{}[General]\nAccentColor=#e93d58\n", kg);
+        let d2 = desk_look(&kg2, Some("[PlasmaViews][Panel 7]\npanelOpacity=2\n"), None, None).unwrap();
+        assert_eq!(d2.accent, 0xffe93d58);
+        assert!(d2.translucent && d2.blur);
+        assert_eq!(palette_desk(&d2, 100).strip >> 24, 0xd8);
+        assert!(desk_look("[General]\nfoo=1\n", None, None, None).is_none(), "no colours: built-in theme");
+    }
 
     #[test]
     fn sysfs_keyboard_scan() {

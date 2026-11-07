@@ -359,19 +359,26 @@ impl Hit {
 
 // ------------------------------------------------------------------ drawing
 
-/// legend of one evdev code (xkb symbol keys follow the desktop layout, the rest the US table)
-fn code_label(c: u16, shift: bool, labels: Option<&crate::xkb::Labels>) -> String {
+/// legend of one evdev code for a modifier state (M2.1: Shift / AltGr / Caps from the xkb levels; xkb symbol keys
+/// follow the desktop layout, the rest the US table)
+fn code_label_m(c: u16, shift: bool, altgr: bool, caps: bool, labels: Option<&crate::xkb::Labels>) -> String {
     if keycodes::is_symbol_key(c) {
-        if let Some((a, b)) = labels.and_then(|l| l.map.get(&c)) {
-            return if shift && !b.is_empty() { b.clone() } else { a.clone() };
+        if let Some(l) = labels.and_then(|l| l.map.get(&c)) {
+            return crate::xkb::pick(l, shift, altgr, caps);
         }
     }
     let (a, b) = keycodes::us_legend(c);
-    if shift && !b.is_empty() {
+    let letter = matches!(c, 16..=25 | 30..=38 | 44..=50);
+    let sh = if letter { shift ^ caps } else { shift };
+    if sh && !b.is_empty() {
         b.to_string()
     } else {
         a.to_string()
     }
+}
+
+fn code_label(c: u16, shift: bool, labels: Option<&crate::xkb::Labels>) -> String {
+    code_label_m(c, shift, false, false, labels)
 }
 
 fn key_label(k: &PlacedKey, m: &UiModel, labels: Option<&crate::xkb::Labels>) -> String {
@@ -388,9 +395,7 @@ fn key_label(k: &PlacedKey, m: &UiModel, labels: Option<&crate::xkb::Labels>) ->
     match &k.kind {
         KeyKind::Code(c) => {
             let c2 = if m.fn_on { keycodes::fn_map(*c) } else { *c };
-            // Caps Lock: letters show upper case (xor Shift)
-            let letter = matches!(c2, 16..=25 | 30..=38 | 44..=50);
-            code_label(c2, if letter { shift ^ caps } else { shift }, labels)
+            code_label_m(c2, shift, m.altgr, caps, labels)
         }
         KeyKind::Combo(v) => {
             // Shift+key: the shifted legend of the key in the desktop layout; other chords: "Ctrl+C" style
@@ -410,7 +415,40 @@ fn key_label(k: &PlacedKey, m: &UiModel, labels: Option<&crate::xkb::Labels>) ->
 
 fn pal(m: &UiModel) -> Palette {
     let (t, a, k) = &m.theme;
-    feedback::palette(if t.is_empty() { "dark" } else { t }, a, if *k == 0 { 100 } else { *k })
+    if t == "desktop" {
+        if let Some(d) = &m.desk {
+            return feedback::palette_desk(d, if *k == 0 { 100 } else { *k });
+        }
+    }
+    feedback::palette(if t.is_empty() || t == "desktop" { "dark" } else { t }, a, if *k == 0 { 100 } else { *k })
+}
+
+/// corner radius scale: the desktop's corners for theme "desktop" (Breeze-like 1.3 mm otherwise)
+fn corner(m: &UiModel) -> f32 {
+    match (&m.desk, m.theme.0.as_str()) {
+        (Some(d), "desktop") => (d.radius_mm / 1.3).clamp(0.0, 3.0),
+        _ => 1.0,
+    }
+}
+
+/// M2.1: the legend state dump for the runner (`LEGENDS ...`, with --debug): what a few keys show now
+pub fn legends_line(m: &UiModel, labels: Option<&crate::xkb::Labels>) -> String {
+    let show = |name: &str| -> String {
+        m.keys.iter().find(|k| matches!(k.kind, KeyKind::Code(c) if keycodes::name(c) == name)).map(|k| key_label(k, m, labels)).unwrap_or_else(|| "-".into())
+    };
+    format!(
+        "LEGENDS shift={} altgr={} caps={} fn={} group={} Q={} A={} 2={} E={} MINUS={}",
+        m.shift,
+        m.altgr,
+        m.leds.0,
+        m.fn_on,
+        labels.map(|l| l.group).unwrap_or(0),
+        show("KEY_Q"),
+        show("KEY_A"),
+        show("KEY_2"),
+        show("KEY_E"),
+        show("KEY_MINUS")
+    )
 }
 
 fn draw_key(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, p: &Palette, k: &PlacedKey, lit: bool, labels: Option<&crate::xkb::Labels>) {
@@ -422,7 +460,7 @@ fn draw_key(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, p: &Palette, k: &Placed
         _ => false,
     };
     let col = if lit { p.accent } else if sym { p.key } else { p.key_mod };
-    let rad = m.px_per_mm * 1.2;
+    let rad = m.px_per_mm * 1.2 * corner(m);
     cv.round_rect(&k.rect, rad, col);
     if on && !lit {
         cv.outline(&k.rect.inset(m.px_per_mm * 0.3), m.px_per_mm * 0.6, p.accent);
@@ -451,10 +489,14 @@ fn draw_button(cv: &mut Canvas, f: &mut Fonts, ppm: f32, p: &Palette, r: &Rect, 
     f.draw_centered(cv, r, label, (r.h * 0.42).min(ppm * 4.0), p.text);
 }
 
-fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, labels: Option<&crate::xkb::Labels>) {
+fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, labels: Option<&crate::xkb::Labels>, wallpaper: Option<&Vec<u32>>) {
     let p = pal(m);
     cv.clear(p.bg);
+    if let Some(w) = wallpaper.filter(|w| w.len() == cv.px.len()) {
+        cv.px.copy_from_slice(w);
+    }
     let ppm = m.px_per_mm;
+    let cr = corner(m);
     cv.fill(&m.strip, p.strip);
     let tr = Rect::new(m.strip.x + ppm * 3.0, m.strip.y, ppm * 22.0, m.strip.h);
     f.draw_left(cv, &tr, &m.title, m.strip.h * 0.4, p.text);
@@ -475,11 +517,11 @@ fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, labels: Option<&crat
     }
     for r in &m.regions {
         if r.id == dexhid_core::arrangement::TOUCHPAD {
-            cv.round_rect(&r.rect, ppm * 2.5, p.pad_edge);
-            cv.round_rect(&r.rect.inset(ppm * 0.4), ppm * 2.2, p.pad);
+            cv.round_rect(&r.rect, ppm * 2.5 * cr, p.pad_edge);
+            cv.round_rect(&r.rect.inset(ppm * 0.4), ppm * 2.2 * cr, p.pad);
         }
         if r.id == dexhid_core::arrangement::QUICK {
-            cv.round_rect(&r.rect, ppm * 2.0, p.zone);
+            cv.round_rect(&r.rect, ppm * 2.0 * cr, p.zone);
         }
     }
     if let Some((l, r)) = &m.zones {
@@ -667,6 +709,9 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
     let mut pool_gen = 0u64;
     let mut last_geo: Option<Geometry> = None;
     let codes = keycodes::all_codes();
+    let mut wp: Option<Vec<u32>> = None;
+    let mut wp_key = (String::new(), 0, 0, false);
+    let mut last_legends = String::new();
 
     let internal = |outs: &[OutInfo]| -> Option<usize> {
         if cfg.internal_output != "auto" {
@@ -693,7 +738,7 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
             cur_group = grp;
             match crate::xkb::labels(last_keymap.as_deref().unwrap_or(""), grp, &codes) {
                 Ok(l) => {
-                    println!("XKB layouts={} group={} names={:?} labelled={} sample={}", l.layouts.len(), l.group, l.layouts, l.map.len(), [16u16, 17, 21, 44].iter().map(|c| l.map.get(c).map(|x| x.0.clone()).unwrap_or_default()).collect::<String>());
+                    println!("XKB layouts={} group={} names={:?} labelled={} sample={}", l.layouts.len(), l.group, l.layouts, l.map.len(), [16u16, 17, 21, 44].iter().map(|c| l.map.get(c).map(|x| x[0].clone()).unwrap_or_default()).collect::<String>());
                     sh.send(Cmd::Labels(l.map.len()));
                     labels = Some(l);
                 }
@@ -865,9 +910,33 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
                             let key = (model.version, labels_gen);
                             if static_key != key || static_px.len() != (bw * bh) as usize {
                                 static_px.resize((bw * bh) as usize, 0);
+                                let blur = model.desk.as_ref().is_some_and(|d| d.blur);
+                                let wkey = (model.wallpaper.clone(), bw, bh, blur);
+                                if !model.wallpaper.is_empty() && wp_key != wkey {
+                                    let t0 = mono_ms();
+                                    wp = match crate::wallpaper::load(&model.wallpaper, bw, bh, blur) {
+                                        Ok(v) => {
+                                            println!("WALLPAPER loaded {}x{} blur={} ms={}", bw, bh, blur, mono_ms() - t0);
+                                            Some(v)
+                                        }
+                                        Err(e) => {
+                                            println!("WALLPAPER not shown: {}", e);
+                                            None
+                                        }
+                                    };
+                                    wp_key = wkey;
+                                }
+                                let wpr = if model.wallpaper.is_empty() { None } else { wp.as_ref() };
                                 let mut cv = Canvas { px: &mut static_px, bw, bh, scale };
-                                draw_static(&mut cv, &mut fonts, model, labels.as_ref());
+                                draw_static(&mut cv, &mut fonts, model, labels.as_ref(), wpr);
                                 static_key = key;
+                                if sh.debug {
+                                    let l = legends_line(model, labels.as_ref());
+                                    if l != last_legends {
+                                        println!("{} t={}", l, mono_ms());
+                                        last_legends = l;
+                                    }
+                                }
                             }
                             let full = pool.bufs[bi].key != static_key;
                             let prev = std::mem::take(&mut pool.bufs[bi].dyn_rects);
@@ -1025,7 +1094,20 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
     if a.flag("--quick") {
         cfg.quick = true;
     }
+    if a.flag("--laptop") {
+        cfg.laptop = true;
+        cfg.laptop_pad_pct = a.f64("--pad-pct", 100.0) as f32;
+    }
     let mut r = Router::new(cfg, l);
+    // M2.1: the desktop look from a kdeglobals file (+ optional plasmashellrc), the wallpaper behind the deck
+    if let Some(f) = a.val("--desk") {
+        let kg = std::fs::read_to_string(&f).unwrap_or_default();
+        let ps = a.val("--plasmashellrc").and_then(|p| std::fs::read_to_string(p).ok());
+        let d = feedback::desk_look(&kg, ps.as_deref(), None, a.val("--radius-px").and_then(|v| v.parse().ok()));
+        println!("DESK {:?}", d.as_ref().map(|d| (&d.scheme, d.translucent)));
+        r.set_theme("desktop", "#4a8be0", 100);
+        r.set_look(d, &a.val("--wallpaper").unwrap_or_default());
+    }
     if a.flag("--quick") {
         let q = dexhid_core::config::QuickCfg::default();
         let (items, _) = dexhid_core::quick::resolve(&q, &|_| true);
@@ -1080,6 +1162,7 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
     }
     let mut m = r.model().clone();
     m.shift = a.flag("--shift");
+    m.altgr = a.flag("--altgr");
     m.fn_on = a.flag("--fn");
     if a.flag("--caps") {
         m.leds = (true, false);
@@ -1089,7 +1172,11 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
         m.lit_keys = (0..m.keys.len()).step_by(7).collect();
         m.dots = vec![(m.w * 0.5, m.h * 0.8)];
     }
-    let labels = a.val("--keymap").and_then(|f| std::fs::read_to_string(f).ok()).and_then(|k| match crate::xkb::labels(&k, 0, &keycodes::all_codes()) {
+    let km = match a.val("--xkb-layout") {
+        Some(l) => crate::xkb::keymap_from_layout(&l).map_err(|e| println!("XKB {}", e)).ok(),
+        None => a.val("--keymap").and_then(|f| std::fs::read_to_string(f).ok()),
+    };
+    let labels = km.and_then(|k| match crate::xkb::labels(&k, 0, &keycodes::all_codes()) {
         Ok(l) => {
             println!("XKB layouts={:?} labelled={}", l.layouts, l.map.len());
             Some(l)
@@ -1105,10 +1192,22 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
     let mut fonts = Fonts::load();
     println!("FONT {} ok={}", fonts.path, fonts.ok());
     {
+        let wp = if m.wallpaper.is_empty() {
+            None
+        } else {
+            match crate::wallpaper::load(&m.wallpaper, bw, bh, m.desk.as_ref().is_some_and(|d| d.blur)) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    println!("WALLPAPER not shown: {}", e);
+                    None
+                }
+            }
+        };
         let mut cv = Canvas { px: &mut px, bw, bh, scale };
-        draw_static(&mut cv, &mut fonts, &m, labels.as_ref());
+        draw_static(&mut cv, &mut fonts, &m, labels.as_ref(), wp.as_ref());
         draw_dynamic(&mut cv, &mut fonts, &m, labels.as_ref());
     }
+    println!("{}", legends_line(&m, labels.as_ref()));
     let mut f = format!("P6\n{} {}\n255\n", bw, bh).into_bytes();
     for p in &px {
         f.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]);

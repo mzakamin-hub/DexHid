@@ -341,6 +341,7 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("numpad", include_str!("../../../data/layouts/numpad.toml")),
     ("textedit", include_str!("../../../data/layouts/textedit.toml")),
     ("remote", include_str!("../../../data/layouts/remote.toml")),
+    ("laptop", include_str!("../../../data/layouts/laptop.toml")),
 ];
 
 /// Load all layouts: built-ins, then every *.toml of `dirs` in order (a later file with the same name replaces an
@@ -392,7 +393,7 @@ mod tests {
         let (all, errs) = load_all(&[]);
         assert!(errs.is_empty(), "{:?}", errs);
         let names: Vec<&str> = all.iter().map(|l| l.name.as_str()).collect();
-        assert_eq!(names, vec!["none", "full", "tablet", "split", "numpad", "textedit", "remote"]);
+        assert_eq!(names, vec!["none", "full", "tablet", "split", "numpad", "textedit", "remote", "laptop"]);
         let full = &all[1];
         // full PC keyboard: function row, Esc, Tab, Ctrl/Alt/Meta, arrows, Home/End/PgUp/PgDn, Ins/Del, numpad (optional)
         let codes: HashSet<u16> = full

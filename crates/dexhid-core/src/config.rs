@@ -56,7 +56,8 @@ pub struct Config {
     pub key_gap_mm: f32,
     /// xkb layout group used for the legends (the active group is not visible to an unfocused client)
     pub xkb_layout_index: u32,
-    /// "dark" | "light" | "amoled" | "auto" (follow the desktop's colour scheme)
+    /// "desktop" (KDE: colours, panel opacity, corners from the desktop; elsewhere like "auto") | "dark" | "light" |
+    /// "amoled" | "auto" (follow the desktop's light / dark preference)
     pub theme: String,
     // ---- M2 settings (all in the settings sheet, see settings.rs)
     /// "touchpad" (libinput touchpad) | "mouse" (own recognizer, relative mouse)
@@ -97,6 +98,29 @@ pub struct Config {
     /// follow the desktop's active keyboard layout for the legends (KDE: org.kde.keyboard)
     pub track_layout: bool,
     pub quick_actions: QuickCfg,
+    // ---- M2.1
+    /// a pending key's hold restarts after this much movement; sliding off a key needs this much beyond its edge
+    pub key_slop_mm: f32,
+    /// neutral key that keeps a cancelled lone modifier from running its tap action: "UNKNOWN" | "F24" | "off"
+    pub modifier_mask: String,
+    /// whole-screen 3/4-finger swipes (delivered as touchpad gestures)
+    pub swipe_gestures: bool,
+    /// travel every finger needs before a swipe is recognised (mm)
+    pub swipe_min_mm: f32,
+    /// both click zones within 50 ms = middle button
+    pub zone_chord_middle: bool,
+    /// two-finger scroll keeps going after a flick (off by default: GTK and Firefox add their own kinetic scroll)
+    pub scroll_inertia: bool,
+    /// inertia decay per second (higher = shorter)
+    pub inertia_friction: f32,
+    /// "free" (movable areas) | "laptop" (laptop grid, keyboard centred, touchpad below)
+    pub arrangement: String,
+    /// laptop preset: touchpad width in % of the keyboard width
+    pub laptop_pad_width: u32,
+    /// KDE: move the Plasma panels to the external monitor while in pad mode (restored on release)
+    pub panels_follow: bool,
+    /// theme "desktop": draw the desktop wallpaper of the tablet screen behind the deck
+    pub wallpaper: bool,
     /// planned feature modules (stored and shown in the settings sheet; acted on from M3)
     pub features: Features,
 }
@@ -201,7 +225,7 @@ impl Default for Config {
             strip_mm: 11.0,
             key_gap_mm: 1.2,
             xkb_layout_index: 0,
-            theme: "dark".into(),
+            theme: "desktop".into(),
             mode: "touchpad".into(),
             natural_scroll: false,
             tap_to_click: true,
@@ -224,6 +248,17 @@ impl Default for Config {
             haptic_feedback: false,
             track_layout: true,
             quick_actions: QuickCfg::default(),
+            key_slop_mm: 3.0,
+            modifier_mask: "UNKNOWN".into(),
+            swipe_gestures: true,
+            swipe_min_mm: 8.0,
+            zone_chord_middle: false,
+            scroll_inertia: false,
+            inertia_friction: 4.0,
+            arrangement: "free".into(),
+            laptop_pad_width: 100,
+            panels_follow: true,
+            wallpaper: false,
             features: Features::default(),
         }
     }

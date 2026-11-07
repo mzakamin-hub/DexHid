@@ -75,11 +75,32 @@ rest_zone_mm = 0.0
 rest_zones = []
 dwt_ms = 300
 pen_pause = true
-# Look: "dark", "light", "amoled", "auto" (follow the desktop); accent colour; key opacity %; status text in the bar.
-theme = "dark"
+# Look: "desktop" (KDE: colour scheme, panel opacity / blur, corner radius from the desktop; elsewhere like "auto"),
+# "dark", "light", "amoled", "auto" (follow the light / dark preference); accent colour; key opacity %; status
+# text in the bar; wallpaper = the desktop wallpaper of the tablet screen behind the keys (PNG / JPEG).
+theme = "desktop"
 accent = "#4a8be0"
 key_alpha = 100
 status_info = true
+wallpaper = false
+
+# M2.1 input behaviour. Keys: a pending key's 150 ms hold restarts after key_slop_mm of movement, sliding off a key
+# needs key_slop_mm beyond its edge; a cancelled lone modifier is released behind a neutral key ("UNKNOWN", "F24"
+# or "off") so its tap action (Super = launcher) does not run.
+key_slop_mm = 3.0
+modifier_mask = "UNKNOWN"
+# 3/4 fingers moving together anywhere on the panel = a touchpad gesture of the desktop (swipe_min_mm of travel)
+swipe_gestures = true
+swipe_min_mm = 8.0
+# both click zones within 50 ms = middle click; two-finger scroll inertia (GTK / Firefox add their own: off)
+zone_chord_middle = false
+scroll_inertia = false
+inertia_friction = 4.0
+# "free" (movable areas) or "laptop" (laptop grid, keyboard centred, touchpad below at laptop_pad_width %)
+arrangement = "free"
+laptop_pad_width = 100
+# KDE: Plasma panels move to the external monitor while in pad mode and come back on release / at the next start
+panels_follow = true
 
 # Quick actions: which buttons show, in order ("id" or "id:2" for a double-size button). Built-in ids: copy paste
 # cut undo redo select_all find save alt_tab show_desktop overview close_window other_screen fullscreen screenshot
