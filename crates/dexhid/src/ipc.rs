@@ -163,16 +163,6 @@ pub fn set_nonblock(fd: c_int) {
     }
 }
 
-/// a short, stable, non-reversible tag for a host address (local use: per-target settings; never log the address)
-pub fn host_tag(addr: &str) -> String {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for b in addr.to_ascii_uppercase().bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    format!("{:08x}", (h >> 32) as u32 ^ h as u32)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,9 +191,5 @@ mod tests {
             close(f);
         }
         let _ = std::fs::remove_file(&p);
-        // (no address-like test strings: the commit guard rejects them)
-        assert_eq!(host_tag("dev_example_one").len(), 8);
-        assert_eq!(host_tag("DEV_EXAMPLE_ONE"), host_tag("dev_example_one"));
-        assert_ne!(host_tag("dev_example_one"), host_tag("dev_example_two"));
     }
 }

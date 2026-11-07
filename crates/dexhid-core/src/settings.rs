@@ -57,7 +57,6 @@ pub const MODULES: &[Module] = &[
     Module { id: "profiles", title: "Profiles", implemented: true, plan: "" },
     Module { id: "mirror", title: "Mirror preview", implemented: true, plan: "" },
     Module { id: "usbhid", title: "USB keyboard / mouse", implemented: true, plan: "" },
-    Module { id: "bthid", title: "Bluetooth keyboard / mouse", implemented: true, plan: "" },
 ];
 
 const ON_OFF_ASK: &[&str] = &["ask", "on", "off"];
@@ -117,7 +116,7 @@ pub const DEFS: &[Def] = &[
     Def { key: "sound_feedback", module: "feedback", title: "Key click sound", kind: Kind::Bool },
     Def { key: "haptic_feedback", module: "feedback", title: "Vibrate on key press", kind: Kind::Bool },
     // M3 modules
-    Def { key: "target", module: "general", title: "Keys + pointer go to", kind: Kind::Choice(&["desktop", "usb", "bluetooth"]) },
+    Def { key: "target", module: "general", title: "Keys + pointer go to", kind: Kind::Choice(&["desktop", "usb"]) },
     Def { key: "features.gestures.enabled", module: "gestures", title: "Gesture shortcuts (3 / 4 fingers)", kind: Kind::Bool },
     Def { key: "features.gestures.options.swipe3_left", module: "gestures", title: "3 fingers left", kind: Kind::Choice(G) },
     Def { key: "features.gestures.options.swipe3_right", module: "gestures", title: "3 fingers right", kind: Kind::Choice(G) },
@@ -155,10 +154,6 @@ pub const DEFS: &[Def] = &[
     Def { key: "features.usbhid.options.layout", module: "usbhid", title: "Keyboard language of that device", kind: Kind::Choice(TARGET_LAYOUTS) },
     Def { key: "features.usbhid.options.abs_pointer", module: "usbhid", title: "Absolute pointer (laser / pen)", kind: Kind::Bool },
     Def { key: "features.usbhid.options.stop_other", module: "usbhid", title: "Stop another gadget that holds the port", kind: Kind::Bool },
-    Def { key: "features.bthid.enabled", module: "bthid", title: "Bluetooth keyboard / mouse", kind: Kind::Bool },
-    Def { key: "features.bthid.options.layout", module: "bthid", title: "Keyboard language of that device", kind: Kind::Choice(TARGET_LAYOUTS) },
-    Def { key: "features.bthid.options.abs_pointer", module: "bthid", title: "Absolute pointer (laser / pen)", kind: Kind::Bool },
-    Def { key: "features.bthid.options.discoverable_s", module: "bthid", title: "Visible for pairing (s)", kind: Kind::Num { min: 30.0, max: 600.0, step: 30.0, int: true } },
 ];
 
 pub fn def(key: &str) -> Option<&'static Def> {
@@ -347,5 +342,8 @@ mod tests {
         assert!(parse(g, "bogus").is_err());
         assert!(parse(def("features.usbhid.options.layout").unwrap(), "de(nodeadkeys)").is_ok());
         assert!(parse(def("target").unwrap(), "usb").is_ok());
+        // Bluetooth HID mode removed (owner decision 7 Nov 2026): no module, no target choice
+        assert!(parse(def("target").unwrap(), "bluetooth").is_err());
+        assert!(module("bthid").is_none() && DEFS.iter().all(|d| !d.key.contains("bthid")));
     }
 }

@@ -1,42 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
-//! M3: `dexhid hid-helper` - the small privileged helper of the USB / Bluetooth HID modes (root: configfs, the UDC,
-//! privileged L2CAP PSMs, BlueZ profile registration). The user daemon connects over a unix seqpacket socket
-//! (`/run/dexhid/hid.sock`, systemd socket unit or started by hand); the helper checks the peer (root, --allow-uid,
-//! or the active seat0 user), does the setup and hands back open file descriptors (SCM_RIGHTS): the /dev/hidgN
-//! nodes for USB, the control + interrupt L2CAP channels for Bluetooth. The daemon writes the reports itself.
+//! M3: `dexhid hid-helper` - the small privileged helper of the USB HID mode (root: configfs, the UDC). The user
+//! daemon connects over a unix seqpacket socket (`/run/dexhid/hid.sock`, systemd socket unit or started by hand);
+//! the helper checks the peer (root, --allow-uid, or the active seat0 user), does the setup and hands back open file
+//! descriptors (SCM_RIGHTS): the /dev/hidgN nodes. The daemon writes the reports itself.
 //! The helper keeps duplicates: when the daemon goes away (EOF: exit, crash, SIGKILL) it sends "everything
-//! released" reports, unbinds and removes the gadget, unregisters the profile, restores the adapter and closes the
-//! channels. One client at a time.
+//! released" reports, unbinds and removes the gadget. One client at a time.
+//! (The Bluetooth HID mode was removed by the owner's decision of 7 Nov 2026: it conflicts with the BlueZ input
+//! plugin the Bluetooth keyboard cover needs.)
 //!
 //! Protocol (one packet per message):
-//!   HELLO | STATUS | USB-UP abs=0|1 stop_other=0|1 udc=auto | USB-DOWN | BT-UP abs=0|1 discoverable=S | BT-DOWN
-//!   -> "OK ..." / "ERR ..."; async: "BT-CONNECTED host=<tag>" (+ control, interrupt fds), "BT-WAITING"
+//!   HELLO | STATUS | USB-UP abs=0|1 stop_other=0|1 udc=auto | USB-DOWN
+//!   -> "OK ..." / "ERR ..."
 
 use crate::ipc;
 use crate::sys::*;
 use dexhid_core::{gadget, hid};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
 
 struct Usb {
     fds: Vec<i32>,
     abs: bool,
     stopped: Vec<(String, String)>,
-}
-
-struct Bt {
-    conn: zbus::blocking::Connection,
-    intr_listen: i32,
-    abs: bool,
-    /// device tag -> control fd (from BlueZ NewConnection), waiting for its interrupt channel
-    ctrl: HashMap<String, i32>,
-    /// connected pairs (ctrl, intr) the daemon got (duplicates kept for the release reports)
-    pairs: Vec<(i32, i32)>,
-    adapter: String,
-    restore: Vec<(&'static str, zbus::zvariant::OwnedValue)>,
-    rx: Receiver<(String, i32)>,
-    wake: i32,
 }
 
 struct H {
@@ -45,7 +29,6 @@ struct H {
     role_dir: PathBuf,
     allow_uid: Option<u32>,
     usb: Option<Usb>,
-    bt: Option<Bt>,
 }
 
 fn arg(a: &crate::debug::Args, k: &str, d: &str) -> String {
@@ -70,7 +53,6 @@ pub fn run(a: &crate::debug::Args) -> i32 {
         role_dir: PathBuf::from(arg(a, "--role-dir", "/sys/class/usb_role")),
         allow_uid: a.val("--allow-uid").and_then(|v| v.parse().ok()),
         usb: None,
-        bt: None,
     };
     // systemd socket activation (LISTEN_FDS=1 -> fd 3) or our own socket
     let lfd = if std::env::var("LISTEN_FDS").as_deref() == Ok("1") { 3 } else {
@@ -90,9 +72,7 @@ pub fn run(a: &crate::debug::Args) -> i32 {
     }
     let mut client: Option<i32> = None;
     while !stopped() {
-        let bt_fds: Vec<i32> = h.bt.as_ref().map(|b| vec![b.intr_listen, b.wake]).unwrap_or_default();
-        let mut fds = vec![lfd, client.unwrap_or(-1)];
-        fds.extend(&bt_fds);
+        let fds = vec![lfd, client.unwrap_or(-1)];
         let r = poll_in(&fds, 1000);
         if r[0] {
             if let Some(c) = ipc::accept(lfd) {
@@ -129,13 +109,6 @@ pub fn run(a: &crate::debug::Args) -> i32 {
                 }
             }
         }
-        if !bt_fds.is_empty() && (r[2] || r[3]) {
-            if let Some(m) = h.bt_events() {
-                if let Some(c) = client {
-                    let _ = ipc::send(c, &m.0, &m.1);
-                }
-            }
-        }
     }
     h.teardown(&stop_reason());
     if let Some(c) = client {
@@ -167,17 +140,6 @@ impl H {
                 let n = self.usb_down();
                 (format!("OK usb down ({} steps)", n), vec![])
             }
-            "BT-UP" => match self.bt_up(kv(m, "abs").as_deref() == Some("1"), kv(m, "discoverable").and_then(|v| v.parse().ok()).unwrap_or(120)) {
-                Ok(t) => (format!("OK bt {}", t), vec![]),
-                Err(e) => {
-                    self.bt_down();
-                    (format!("ERR {}", e), vec![])
-                }
-            },
-            "BT-DOWN" => {
-                self.bt_down();
-                ("OK bt down".into(), vec![])
-            }
             _ => (format!("ERR unknown command {:?}", cmd), vec![]),
         }
     }
@@ -194,8 +156,6 @@ impl H {
             "role_text": gadget::role_text(&roles).1,
             "power": pw.line(),
             "usb_up": self.usb.is_some(),
-            "bt_up": self.bt.is_some(),
-            "bt_connected": self.bt.as_ref().map(|b| b.pairs.len()).unwrap_or(0),
         })
         .to_string()
     }
@@ -289,124 +249,11 @@ impl H {
         n
     }
 
-    // ------------------------------------------------------------------------------------------------ Bluetooth
-
-    fn bt_up(&mut self, abs: bool, discoverable: u32) -> Result<String, String> {
-        if self.bt.is_some() {
-            return Err("Bluetooth HID is up already".into());
-        }
-        // the interrupt channel is ours; BlueZ hands the control channel over (Profile1.NewConnection)
-        let intr = l2cap_listen(hid::PSM_INTERRUPT).map_err(|e| {
-            if e.contains("in use") {
-                format!("PSM 19 is in use: BlueZ's input plugin listens on the HID PSMs (17 / 19) as a host. Bluetooth HID device mode needs bluetoothd started without it (--noplugin=input, an owner step). ({})", e)
-            } else {
-                e
-            }
-        })?;
-        let conn = zbus::blocking::Connection::system().map_err(|e| format!("system bus: {}", e))?;
-        let (tx, rx) = channel();
-        let (wake_rd, wake_wr) = wake_pipe();
-        let prof = BtProfile { tx, wake: wake_wr };
-        conn.object_server().at(PROFILE_PATH, prof).map_err(|e| format!("profile object: {}", e))?;
-        let desc = hid::bt_descriptor(abs);
-        let mut opts: HashMap<&str, zbus::zvariant::Value> = HashMap::new();
-        opts.insert("Name", "DexHid keyboard + mouse".into());
-        opts.insert("Role", "server".into());
-        opts.insert("PSM", zbus::zvariant::Value::U16(hid::PSM_CONTROL));
-        opts.insert("RequireAuthentication", true.into());
-        opts.insert("RequireAuthorization", false.into());
-        opts.insert("AutoConnect", false.into());
-        opts.insert("ServiceRecord", hid::sdp_record(&desc).into());
-        let path = zbus::zvariant::ObjectPath::try_from(PROFILE_PATH).unwrap();
-        conn.call_method(Some("org.bluez"), "/org/bluez", Some("org.bluez.ProfileManager1"), "RegisterProfile", &(path, hid::BT_HID_UUID, opts))
-            .map_err(|e| format!("RegisterProfile: {}", e))?;
-        println!("HIDHELPER bt profile registered uuid={} record_bytes={} descriptor_bytes={}", hid::BT_HID_UUID, hid::sdp_record(&desc).len(), desc.len());
-        let adapter = "/org/bluez/hci0".to_string();
-        let mut restore = vec![];
-        for (p, v) in [("Pairable", zbus::zvariant::Value::Bool(true)), ("DiscoverableTimeout", zbus::zvariant::Value::U32(discoverable)), ("Discoverable", zbus::zvariant::Value::Bool(true))] {
-            if let Some(old) = prop_get(&conn, &adapter, p) {
-                restore.push((p, old));
-            }
-            if let Err(e) = prop_set(&conn, &adapter, p, v) {
-                println!("HIDHELPER WARN adapter {}: {}", p, e);
-            }
-        }
-        self.bt = Some(Bt { conn, intr_listen: intr, abs, ctrl: HashMap::new(), pairs: vec![], adapter, restore, rx, wake: wake_rd });
-        Ok(format!("listening psm_control=17(bluez) psm_interrupt=19 discoverable_s={} abs={}", discoverable, abs as u8))
-    }
-
-    /// new channels: the control fd from BlueZ, the interrupt connection on our socket; a complete pair goes to
-    /// the daemon
-    fn bt_events(&mut self) -> Option<(String, Vec<i32>)> {
-        let b = self.bt.as_mut()?;
-        drain(b.wake);
-        while let Ok((tag, fd)) = b.rx.try_recv() {
-            println!("HIDHELPER bt control channel host={}", tag);
-            b.ctrl.insert(tag, fd);
-        }
-        let mut sa = [0u8; 16];
-        let mut l = sa.len() as libc::socklen_t;
-        let c = unsafe { libc::accept4(b.intr_listen, sa.as_mut_ptr() as *mut libc::sockaddr, &mut l, libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK) };
-        if c >= 0 {
-            // sockaddr_l2: family(2) psm(2) bdaddr(6, little endian)
-            let a: Vec<String> = sa[4..10].iter().rev().map(|x| format!("{:02X}", x)).collect();
-            let tag = ipc::host_tag(&format!("dev_{}", a.join("_")));
-            println!("HIDHELPER bt interrupt channel host={}", tag);
-            let ctrl = b.ctrl.remove(&tag).or_else(|| {
-                let k = b.ctrl.keys().next().cloned()?;
-                b.ctrl.remove(&k)
-            });
-            match ctrl {
-                Some(cf) => {
-                    b.pairs.push((unsafe { libc::dup(cf) }, unsafe { libc::dup(c) }));
-                    return Some((format!("BT-CONNECTED host={}", tag), vec![cf, c]));
-                }
-                None => {
-                    println!("HIDHELPER WARN interrupt channel without a control channel: closed");
-                    ipc::close(c);
-                }
-            }
-        }
-        None
-    }
-
-    fn bt_down(&mut self) {
-        let Some(b) = self.bt.take() else { return };
-        for (cf, inf) in &b.pairs {
-            for r in hid::all_released(b.abs) {
-                if let Some(f) = hid::encode_bt(&r, b.abs) {
-                    let _ = ipc::write_fd(*inf, &f);
-                }
-            }
-            ipc::close(*inf);
-            ipc::close(*cf);
-        }
-        for (_, f) in b.ctrl {
-            ipc::close(f);
-        }
-        ipc::close(b.intr_listen);
-        let path = zbus::zvariant::ObjectPath::try_from(PROFILE_PATH).unwrap();
-        match b.conn.call_method(Some("org.bluez"), "/org/bluez", Some("org.bluez.ProfileManager1"), "UnregisterProfile", &(path,)) {
-            Ok(_) => println!("HIDHELPER bt profile unregistered"),
-            Err(e) => println!("HIDHELPER WARN UnregisterProfile: {}", e),
-        }
-        for (p, v) in b.restore.into_iter().rev() {
-            let v = zbus::zvariant::Value::from(v);
-            match prop_set(&b.conn, &b.adapter, p, v) {
-                Ok(()) => println!("HIDHELPER adapter {} restored", p),
-                Err(e) => println!("HIDHELPER WARN adapter {} not restored: {}", p, e),
-            }
-        }
-        let _ = b.conn.object_server().remove::<BtProfile, _>(PROFILE_PATH);
-        println!("HIDHELPER bt down: released reports sent, channels closed, adapter restored");
-    }
-
     fn teardown(&mut self, why: &str) {
-        if self.usb.is_some() || self.bt.is_some() {
+        if self.usb.is_some() {
             println!("HIDHELPER teardown ({})", why);
         }
         self.usb_down();
-        self.bt_down();
     }
 }
 
@@ -424,66 +271,4 @@ fn hidg_node(func: &Path) -> Result<String, String> {
         sleep_ms(20);
     }
     Err(format!("{} did not appear", p))
-}
-
-const PROFILE_PATH: &str = "/org/dexhid/hidprofile";
-
-struct BtProfile {
-    tx: Sender<(String, i32)>,
-    wake: i32,
-}
-
-#[zbus::interface(name = "org.bluez.Profile1")]
-impl BtProfile {
-    fn release(&self) {
-        println!("HIDHELPER bt profile released by BlueZ");
-    }
-    fn new_connection(&self, device: zbus::zvariant::OwnedObjectPath, fd: zbus::zvariant::OwnedFd, _props: HashMap<String, zbus::zvariant::OwnedValue>) {
-        // the device path carries the address: only a tag of it is used (and never logged)
-        let tag = ipc::host_tag(device.as_str().rsplit('/').next().unwrap_or(""));
-        let raw = std::os::fd::IntoRawFd::into_raw_fd(std::os::fd::OwnedFd::from(fd));
-        let _ = self.tx.send((tag, raw));
-        poke(self.wake);
-    }
-    fn request_disconnection(&self, _device: zbus::zvariant::OwnedObjectPath) {
-        println!("HIDHELPER bt disconnection requested");
-    }
-}
-
-fn prop_get(c: &zbus::blocking::Connection, path: &str, p: &str) -> Option<zbus::zvariant::OwnedValue> {
-    let m = c.call_method(Some("org.bluez"), path, Some("org.freedesktop.DBus.Properties"), "Get", &("org.bluez.Adapter1", p)).ok()?;
-    m.body().deserialize::<zbus::zvariant::OwnedValue>().ok()
-}
-
-fn prop_set(c: &zbus::blocking::Connection, path: &str, p: &str, v: zbus::zvariant::Value) -> Result<(), String> {
-    c.call_method(Some("org.bluez"), path, Some("org.freedesktop.DBus.Properties"), "Set", &("org.bluez.Adapter1", p, v)).map(|_| ()).map_err(|e| e.to_string())
-}
-
-/// a listening L2CAP seqpacket socket on a PSM (any adapter), encryption required (BT_SECURITY medium)
-fn l2cap_listen(psm: u16) -> Result<i32, String> {
-    const AF_BLUETOOTH: i32 = 31;
-    const BTPROTO_L2CAP: i32 = 0;
-    const SOL_BLUETOOTH: i32 = 274;
-    const BT_SECURITY: i32 = 4;
-    let fd = unsafe { libc::socket(AF_BLUETOOTH, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, BTPROTO_L2CAP) };
-    if fd < 0 {
-        return Err(format!("L2CAP socket: {} (no Bluetooth in the kernel?)", ipc::errstr()));
-    }
-    // struct sockaddr_l2 { sa_family_t l2_family; __le16 l2_psm; bdaddr_t l2_bdaddr; __le16 l2_cid; __u8 l2_bdaddr_type; }
-    let mut sa = [0u8; 14];
-    sa[0..2].copy_from_slice(&(AF_BLUETOOTH as u16).to_ne_bytes());
-    sa[2..4].copy_from_slice(&psm.to_le_bytes());
-    if unsafe { libc::bind(fd, sa.as_ptr() as *const libc::sockaddr, sa.len() as u32) } < 0 {
-        let e = crate::sys::errno();
-        ipc::close(fd);
-        return Err(format!("bind PSM {}: {}{}", psm, crate::sys::strerr(e), if e == libc::EADDRINUSE { " (in use)" } else { "" }));
-    }
-    let sec: [u8; 2] = [2, 0];
-    unsafe { libc::setsockopt(fd, SOL_BLUETOOTH, BT_SECURITY, sec.as_ptr() as *const libc::c_void, 2) };
-    if unsafe { libc::listen(fd, 2) } < 0 {
-        let e = ipc::errstr();
-        ipc::close(fd);
-        return Err(format!("listen PSM {}: {}", psm, e));
-    }
-    Ok(fd)
 }

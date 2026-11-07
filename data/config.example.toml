@@ -102,8 +102,9 @@ laptop_pad_width = 100
 panels_follow = true
 
 # M3: where keys and the pointer go: "desktop" (this desktop), "usb" (the tablet is a USB keyboard + mouse for another
-# device: configfs gadget, needs the root helper `dexhid hid-helper`, dexhid-hid.socket), "bluetooth" (a Bluetooth
-# keyboard + mouse). The strip's target button switches between the enabled ones.
+# device: configfs gadget, needs the root helper `dexhid hid-helper`, dexhid-hid.socket). The strip's target button
+# switches between them while USB is enabled. (The Bluetooth HID mode was removed on 7 Nov 2026: it conflicts with the
+# BlueZ input plugin a Bluetooth keyboard needs; old `features.bthid` / `target = "bluetooth"` settings are ignored.)
 target = "desktop"
 hid_helper_socket = "/run/dexhid/hid.sock"
 
@@ -145,5 +146,3 @@ actions = ["copy", "paste", "undo", "redo", "alt_tab", "show_desktop", "screensh
 # options = { fps = 2, size_pct = 35 }
 # [features.usbhid]            # keyboard language of the other device (xkb layout or layout(variant), "desktop")
 # options = { layout = "desktop", abs_pointer = false, stop_other = false, udc = "auto" }
-# [features.bthid]
-# options = { layout = "desktop", abs_pointer = false, discoverable_s = 120 }

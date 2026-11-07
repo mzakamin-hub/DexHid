@@ -122,7 +122,7 @@ pub struct Config {
     /// feature modules (M3: all acted on), each with an on/off flag and options
     pub features: Features,
     // ---- M3
-    /// where keys and pointer go: "desktop" (this desktop, uinput) | "usb" | "bluetooth" (another device)
+    /// where keys and pointer go: "desktop" (this desktop, uinput) | "usb" (another device)
     pub target: String,
     /// the USB HID helper's socket (root helper: dexhid usb-helper)
     pub hid_helper_socket: String,
@@ -181,8 +181,6 @@ pub struct Features {
     pub mirror: Feature,
     /// M3: the tablet as a USB keyboard + mouse for another device (configfs gadget through the helper)
     pub usbhid: Feature,
-    /// M3: the tablet as a Bluetooth keyboard + mouse
-    pub bthid: Feature,
 }
 
 impl Default for Features {
@@ -203,7 +201,6 @@ impl Default for Features {
             profiles: feat(&[("per_app", B(false))]),
             mirror: feat(&[("fps", I(2)), ("size_pct", I(35))]),
             usbhid: feat(&[("layout", S("desktop".into())), ("abs_pointer", B(false)), ("stop_other", B(false)), ("udc", S("auto".into()))]),
-            bthid: feat(&[("layout", S("desktop".into())), ("abs_pointer", B(false)), ("discoverable_s", I(120))]),
         }
     }
 }
@@ -333,12 +330,23 @@ pub fn save_settings(p: &Path, t: &toml::Table) -> Result<(), String> {
 
 /// settings of removed features: still accepted in old files, dropped before the strict parse
 /// (`wallpaper`: the wallpaper behind the keys, removed by the owner's decision of 7 Nov 2026)
-/// (`features.wireless`: the M2 design-only module, replaced by `features.usbhid` / `features.bthid` in M3)
-pub const RETIRED_KEYS: &[&str] = &["wallpaper", "features.wireless"];
+/// (`features.wireless`: the M2 design-only module, replaced by `features.usbhid` in M3)
+/// (`features.bthid`: the Bluetooth HID mode, removed by the owner's decision of 7 Nov 2026: it conflicts with the
+/// BlueZ input plugin the Bluetooth keyboard cover needs)
+pub const RETIRED_KEYS: &[&str] = &["wallpaper", "features.wireless", "features.bthid"];
 
-/// remove retired keys (dotted paths) from a table; one note per key found
+/// retired values of kept settings (key, value): dropped (back to the default) with one note
+pub const RETIRED_VALUES: &[(&str, &str)] = &[("target", "bluetooth")];
+
+/// remove retired keys (dotted paths) and retired values from a table; one note per key found
 pub fn strip_retired(t: &mut toml::Table) -> Vec<String> {
     let mut notes = vec![];
+    for (k, v) in RETIRED_VALUES {
+        if t.get(*k).and_then(|x| x.as_str()) == Some(*v) {
+            t.remove(*k);
+            notes.push(format!("NOTE retired setting `{} = \"{}\"` ignored (feature removed)", k, v));
+        }
+    }
     for k in RETIRED_KEYS {
         let parts: Vec<&str> = k.split('.').collect();
         let mut cur: Option<&mut toml::Table> = Some(t);
@@ -447,8 +455,7 @@ pub struct Persist {
     pub autostart: Option<String>,
     /// EDID hash (hex) -> "pad" | "display"; stays local, never logged in full
     pub monitors: BTreeMap<String, String>,
-    /// M3: keyboard language per HID target ("usb", "bt:<hash of the host address>") -> xkb layout
-    pub targets: BTreeMap<String, String>,
+    // (the per-host keyboard languages of the removed Bluetooth HID mode, `targets`, are ignored in old files)
     /// M3: a profile chosen by the user (None = automatic selection)
     pub profile: Option<String>,
 }
@@ -539,6 +546,36 @@ mod tests {
         assert_eq!(notes.iter().filter(|n| n.contains("retired setting `wallpaper`")).count(), 1, "{:?}", notes);
         assert_eq!(c.theme, "desktop");
         assert_eq!(c.speed, 1.2);
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn retired_bluetooth_hid_keys_are_ignored_with_one_note() {
+        let d = std::env::temp_dir().join(format!("dexhid-retired-bt-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let user = d.join("config.toml");
+        std::fs::write(&user, "speed = 1.3\n").unwrap();
+        let old = "target = \"bluetooth\"\n[features.usbhid]\nenabled = true\n[features.bthid]\nenabled = true\noptions = { layout = \"de\", abs_pointer = true, discoverable_s = 120 }\n";
+        let mut s: toml::Table = toml::from_str(old).unwrap();
+        let n1 = strip_retired(&mut s);
+        assert_eq!(n1.len(), 2, "{:?}", n1);
+        assert!(n1.iter().any(|n| n.contains("retired setting `features.bthid`")), "{:?}", n1);
+        assert!(n1.iter().any(|n| n.contains("retired setting `target = \"bluetooth\"`")), "{:?}", n1);
+        let (c, notes) = load_with(&[user], &s, false);
+        assert!(notes.iter().all(|n| !n.starts_with("ERROR")), "{:?}", notes);
+        assert_eq!(c.target, "desktop", "back to the default");
+        assert!(c.features.usbhid.enabled, "the USB HID settings stay");
+        assert_eq!(c.speed, 1.3);
+        // the same keys in a config file: one note each from the merged table
+        std::fs::write(d.join("old.toml"), old).unwrap();
+        let (c, notes) = load(&[d.join("old.toml")]);
+        assert!(notes.iter().all(|n| !n.starts_with("ERROR")), "{:?}", notes);
+        assert_eq!(notes.iter().filter(|n| n.contains("retired setting")).count(), 2, "{:?}", notes);
+        assert_eq!(c.target, "desktop");
+        // an old state file with per-host keyboard languages loads (the map is ignored)
+        let p = d.join("state.toml");
+        std::fs::write(&p, "keyboard = \"tablet\"\n[targets]\nusb = \"de\"\n\"bt:0123abcd\" = \"fr\"\n").unwrap();
+        assert_eq!(Persist::load(&p).keyboard.as_deref(), Some("tablet"));
         std::fs::remove_dir_all(&d).ok();
     }
 

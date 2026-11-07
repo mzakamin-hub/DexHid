@@ -57,7 +57,7 @@ pub fn run(a: &Args) -> i32 {
     }
 }
 
-/// `debug hid-desc kbd|mouse|extra|extra-abs|bt|bt-abs|sdp`: a report descriptor as hex (runner: compare with configfs)
+/// `debug hid-desc kbd|mouse|extra|extra-abs`: a report descriptor as hex (runner: compare with configfs)
 fn hid_desc(a: &Args) -> i32 {
     use dexhid_core::hid;
     let w = a.0.get(1).map(|s| s.as_str()).unwrap_or("kbd");
@@ -66,14 +66,8 @@ fn hid_desc(a: &Args) -> i32 {
         "mouse" => hid::usb_functions(false)[1].desc.clone(),
         "extra" => hid::usb_functions(false)[2].desc.clone(),
         "extra-abs" => hid::usb_functions(true)[2].desc.clone(),
-        "bt" => hid::bt_descriptor(false),
-        "bt-abs" => hid::bt_descriptor(true),
-        "sdp" => {
-            print!("{}", hid::sdp_record(&hid::bt_descriptor(false)));
-            return 0;
-        }
         _ => {
-            println!("FAIL hid-desc: kbd | mouse | extra | extra-abs | bt | bt-abs | sdp");
+            println!("FAIL hid-desc: kbd | mouse | extra | extra-abs");
             return 2;
         }
     };

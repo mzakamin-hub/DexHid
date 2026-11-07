@@ -84,7 +84,7 @@ pub struct RouterCfg {
     pub emoji: bool,
     /// mirror preview size in % of the pad width (0 = off)
     pub mirror_pct: f32,
-    /// the target button in the strip ("This desktop" / "USB" / "Bluetooth"), None = hidden
+    /// the target button in the strip ("This desktop" / "USB"), None = hidden
     pub target_label: Option<String>,
 }
 
@@ -177,7 +177,7 @@ pub enum Btn {
     SheetPrev,
     SheetNext,
     // M3
-    /// the strip's target button (desktop -> usb -> bluetooth)
+    /// the strip's target button (desktop -> usb)
     Target,
     /// emoji panel: category tab i, emoji i
     EmojiTab(u8),
@@ -930,7 +930,7 @@ impl Router {
         self.sheet_keys.clear();
         if let Some(md) = self.sheet.get(self.sheet_tab).cloned() {
             view.title = md.title.clone();
-            // M3: a live module may carry a status line (USB / Bluetooth HID: power, data role, host)
+            // M3: a live module may carry a status line (USB HID: power, data role, host)
             view.subtitle = if md.live { md.plan.clone() } else { format!("planned ({}): settings are stored now", md.plan) };
             let pages = md.rows.len().div_ceil(per_page).max(1);
             self.sheet_page = self.sheet_page.min(pages - 1);

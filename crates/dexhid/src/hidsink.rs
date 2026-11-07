@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
-//! M3: the HID sink of the USB / Bluetooth modes, in the daemon. Same router, different sink: key events become
+//! M3: the HID sink of the USB mode, in the daemon. Same router, different sink: key events become
 //! keyboard / consumer / system reports, touchpad frames go through the relative-mouse recognizer (mouse.rs) and
 //! become mouse reports, the laser / pen give absolute reports. The fds come from the root helper (hidhelper.rs);
 //! the helper keeps duplicates and sends "everything released" if this process dies.
@@ -16,14 +16,12 @@ use std::collections::VecDeque;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Usb,
-    Bt,
 }
 
 impl Kind {
     pub fn name(&self) -> &'static str {
         match self {
             Kind::Usb => "usb",
-            Kind::Bt => "bluetooth",
         }
     }
 }
@@ -31,8 +29,6 @@ impl Kind {
 #[derive(Debug, PartialEq)]
 pub enum Event {
     Leds(bool, bool),
-    Connected(String),
-    Disconnected(String),
     HelperGone,
     Note(String),
 }
@@ -40,7 +36,7 @@ pub enum Event {
 pub struct Sink {
     pub kind: Kind,
     helper: i32,
-    /// usb: kbd, mouse, extra; bt: ctrl, intr (empty until a host connects)
+    /// kbd, mouse, extra
     fds: Vec<i32>,
     keys: KeyState,
     mouse: MouseState,
@@ -57,7 +53,7 @@ pub struct Sink {
 fn request(sock: i32, msg: &str) -> Result<(String, Vec<i32>), String> {
     ipc::send(sock, msg, &[])?;
     let mut fds = [libc::pollfd { fd: sock, events: libc::POLLIN, revents: 0 }];
-    // RegisterProfile / gadget binding can take a moment
+    // gadget binding can take a moment
     if unsafe { libc::poll(fds.as_mut_ptr(), 1, 8000) } <= 0 {
         return Err("the HID helper did not answer".into());
     }
@@ -81,7 +77,7 @@ pub fn helper_query(path: &str, msg: &str) -> Result<String, String> {
 
 impl Sink {
     /// connect to the helper and bring the mode up
-    pub fn open(kind: Kind, path: &str, abs: bool, stop_other: bool, udc: &str, discoverable: u32, units_per_mm: f32) -> Result<Sink, String> {
+    pub fn open(kind: Kind, path: &str, abs: bool, stop_other: bool, udc: &str, units_per_mm: f32) -> Result<Sink, String> {
         let s = ipc::connect(path).map_err(|e| format!("{} (is the DexHid HID helper running? dexhid-hid.socket / `sudo dexhid hid-helper`)", e))?;
         let hello = request(s, "HELLO");
         if let Err(e) = hello {
@@ -90,7 +86,6 @@ impl Sink {
         }
         let cmd = match kind {
             Kind::Usb => format!("USB-UP abs={} stop_other={} udc={}", abs as u8, stop_other as u8, udc),
-            Kind::Bt => format!("BT-UP abs={} discoverable={}", abs as u8, discoverable),
         };
         let (reply, fds) = match request(s, &cmd) {
             Ok(x) => x,
@@ -99,7 +94,7 @@ impl Sink {
                 return Err(e);
             }
         };
-        if kind == Kind::Usb && fds.len() != 3 {
+        if fds.len() != 3 {
             ipc::close(s);
             return Err(format!("helper sent {} fds, expected 3", fds.len()));
         }
@@ -116,7 +111,7 @@ impl Sink {
             rec,
             abs,
             queue: VecDeque::new(),
-            host: if kind == Kind::Usb { Some("usb".into()) } else { None },
+            host: Some("usb".into()),
             info: reply.trim_start_matches("OK ").to_string(),
             sent: 0,
             dropped_no_host: 0,
@@ -125,20 +120,12 @@ impl Sink {
     }
 
     pub fn connected(&self) -> bool {
-        match self.kind {
-            Kind::Usb => true,
-            Kind::Bt => self.fds.len() == 2,
-        }
+        true
     }
 
     /// the fds the daemon polls: the helper socket, then the data fds
     pub fn poll_fds(&self) -> Vec<i32> {
-        let mut v = vec![self.helper];
-        match self.kind {
-            Kind::Usb => v.push(self.fds.first().copied().unwrap_or(-1)),
-            Kind::Bt => v.extend(self.fds.iter().copied()),
-        }
-        v
+        vec![self.helper, self.fds.first().copied().unwrap_or(-1)]
     }
 
     pub fn queued(&self) -> bool {
@@ -197,11 +184,6 @@ impl Sink {
             Kind::Usb => {
                 if let Some((i, b)) = hid::encode_usb(&r, self.abs) {
                     self.write(i, b);
-                }
-            }
-            Kind::Bt => {
-                if let Some(b) = hid::encode_bt(&r, self.abs) {
-                    self.write(1, b);
                 }
             }
         }
@@ -269,24 +251,10 @@ impl Sink {
         if fd == self.helper {
             match ipc::recv(self.helper) {
                 Some((m, fds)) => {
-                    if let Some(h) = m.strip_prefix("BT-CONNECTED host=") {
-                        for f in &self.fds {
-                            ipc::close(*f);
-                        }
-                        for f in &fds {
-                            ipc::set_nonblock(*f);
-                        }
-                        self.fds = fds;
-                        self.host = Some(format!("bt:{}", h.trim()));
-                        self.keys = KeyState::default();
-                        self.mouse = MouseState::default();
-                        ev.push(Event::Connected(self.host.clone().unwrap()));
-                    } else {
-                        for f in fds {
-                            ipc::close(f);
-                        }
-                        ev.push(Event::Note(format!("helper: {}", m)));
+                    for f in fds {
+                        ipc::close(f);
                     }
+                    ev.push(Event::Note(format!("helper: {}", m)));
                 }
                 None => ev.push(Event::HelperGone),
             }
@@ -295,34 +263,9 @@ impl Sink {
         let mut b = [0u8; 64];
         let idx = self.fds.iter().position(|x| *x == fd);
         match ipc::read_fd(fd, &mut b) {
-            Ok(0) | Err(_) if self.kind == Kind::Bt => {
-                let h = self.host.take().unwrap_or_default();
-                for f in std::mem::take(&mut self.fds) {
-                    ipc::close(f);
-                }
-                self.queue.clear();
-                ev.push(Event::Disconnected(h));
-            }
             Ok(n) if n > 0 => match (self.kind, idx) {
                 (Kind::Usb, Some(0)) => {
                     if let Some((c, nl)) = hid::leds_usb(&b[..n]) {
-                        ev.push(Event::Leds(c, nl));
-                    }
-                }
-                (Kind::Bt, Some(0)) => {
-                    let r = hid::bt_control(&b[..n], &self.keys);
-                    if let Some(rep) = r.reply {
-                        let _ = ipc::write_fd(fd, &rep);
-                    }
-                    if let Some((c, nl)) = r.leds {
-                        ev.push(Event::Leds(c, nl));
-                    }
-                    if r.unplug {
-                        ev.push(Event::Note("host: virtual cable unplug".into()));
-                    }
-                }
-                (Kind::Bt, Some(1)) => {
-                    if let Some((c, nl)) = hid::leds_bt(&b[..n]) {
                         ev.push(Event::Leds(c, nl));
                     }
                 }
@@ -338,7 +281,6 @@ impl Sink {
         let n = self.release_all();
         let msg = match self.kind {
             Kind::Usb => "USB-DOWN",
-            Kind::Bt => "BT-DOWN",
         };
         let r = request(self.helper, msg).map(|x| x.0).unwrap_or_else(|e| format!("ERR {}", e));
         for f in &self.fds {

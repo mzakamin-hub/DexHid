@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
 //! M3 features in the daemon (a child module of daemon.rs, so it extends `D`):
 //! gesture actions, clipboard strip, word suggestions + emoji, presentation timer + laser, pen on the monitor,
-//! profiles (per monitor / per app with a KWin script), the mirror preview, and the USB / Bluetooth HID targets
+//! profiles (per monitor / per app with a KWin script), the mirror preview, and the USB HID target
 //! (the sink in hidsink.rs, the root helper in hidhelper.rs). Every feature is a settings module (settings.rs).
 
 use super::D;
@@ -136,10 +136,9 @@ impl D {
         rc.suggest_band = f.suggest.enabled && f.suggest.b("words", true);
         rc.emoji = f.suggest.enabled && f.suggest.b("emoji_panel", true);
         rc.mirror_pct = if f.mirror.enabled { f.mirror.n("size_pct", 35.0) as f32 } else { 0.0 };
-        rc.target_label = if f.usbhid.enabled || f.bthid.enabled {
+        rc.target_label = if f.usbhid.enabled {
             Some(match self.m3.target.as_str() {
                 "usb" => "To: USB device".into(),
-                "bluetooth" => "To: Bluetooth".into(),
                 _ => "To: this desktop".into(),
             })
         } else {
@@ -205,11 +204,10 @@ impl D {
         // the HID target
         let want = match self.cfg.target.as_str() {
             "usb" if f.usbhid.enabled => "usb",
-            "bluetooth" if f.bthid.enabled => "bluetooth",
             _ => "desktop",
         };
-        let opts_changed = old.is_some_and(|o| (o.features.usbhid.clone(), o.features.bthid.clone()) != (f.usbhid.clone(), f.bthid.clone()));
-        if want != self.m3.target || (opts_changed && want != "desktop" && old.is_some_and(|o| o.features.usbhid.options.get("abs_pointer") != f.usbhid.options.get("abs_pointer") || o.features.bthid.options.get("abs_pointer") != f.bthid.options.get("abs_pointer"))) {
+        let opts_changed = old.is_some_and(|o| o.features.usbhid != f.usbhid);
+        if want != self.m3.target || (opts_changed && want != "desktop" && old.is_some_and(|o| o.features.usbhid.options.get("abs_pointer") != f.usbhid.options.get("abs_pointer"))) {
             self.m3_set_target(want);
         } else if opts_changed {
             self.m3_legends();
@@ -222,11 +220,8 @@ impl D {
         let f = &self.cfg.features;
         let l = match self.m3.target.as_str() {
             "usb" => f.usbhid.s("layout", "desktop"),
-            "bluetooth" => f.bthid.s("layout", "desktop"),
             _ => "desktop".into(),
         };
-        // per target (BT host) memory
-        let l = self.m3.sink.as_ref().and_then(|s| s.host.as_ref()).and_then(|h| self.persist.targets.get(h)).cloned().filter(|_| l == "desktop").unwrap_or(l);
         if l == "desktop" {
             self.xkb.1.get(self.xkb.0 as usize).cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| "us".into())
         } else {
@@ -255,9 +250,9 @@ impl D {
         self.m3.sink_note.clear();
         if want != "desktop" {
             let f = &self.cfg.features;
-            let (kind, abs) = if want == "usb" { (Kind::Usb, f.usbhid.b("abs_pointer", false)) } else { (Kind::Bt, f.bthid.b("abs_pointer", false)) };
+            let abs = f.usbhid.b("abs_pointer", false);
             let upm = self.router.pad_spec().map(|s| s.2 as f32).unwrap_or(124.0);
-            match Sink::open(kind, &self.cfg.hid_helper_socket, abs, f.usbhid.b("stop_other", false), &f.usbhid.s("udc", "auto"), f.bthid.n("discoverable_s", 120.0) as u32, upm) {
+            match Sink::open(Kind::Usb, &self.cfg.hid_helper_socket, abs, f.usbhid.b("stop_other", false), &f.usbhid.s("udc", "auto"), upm) {
                 Ok(s) => {
                     println!("HID-TARGET t={} {} up: {}", now(), want, s.info);
                     self.m3.sink = Some(s);
@@ -347,7 +342,7 @@ impl D {
             }
             Out::TargetNext => {
                 let f = &self.cfg.features;
-                let order: Vec<&str> = ["desktop", "usb", "bluetooth"].into_iter().filter(|t| *t == "desktop" || (*t == "usb" && f.usbhid.enabled) || (*t == "bluetooth" && f.bthid.enabled)).collect();
+                let order: Vec<&str> = ["desktop", "usb"].into_iter().filter(|t| *t == "desktop" || (*t == "usb" && f.usbhid.enabled)).collect();
                 let i = order.iter().position(|t| *t == self.cfg.target).unwrap_or(0);
                 let next = order[(i + 1) % order.len()].to_string();
                 if let Err(e) = self.set_setting("target", Some(&next), 0) {
@@ -820,16 +815,6 @@ impl D {
                     let o = self.router.set_leds(c, n);
                     self.apply(o);
                 }
-                hidsink::Event::Connected(h) => {
-                    println!("HID-HOST t={} connected host={}", now(), h);
-                    self.m3.target_labels = None;
-                    self.m3_legends();
-                    self.m3.info_next = 0;
-                }
-                hidsink::Event::Disconnected(h) => {
-                    println!("HID-HOST t={} disconnected host={}", now(), h);
-                    self.m3.info_next = 0;
-                }
                 hidsink::Event::Note(n) => println!("NOTE {}", n),
                 hidsink::Event::HelperGone => {
                     println!("ERROR HID helper gone: back to this desktop");
@@ -908,7 +893,7 @@ impl D {
         v.join("  |  ")
     }
 
-    /// the live status line of the USB / Bluetooth tabs of the settings sheet
+    /// the live status line of the USB tab of the settings sheet
     pub(super) fn m3_sheet_note(&self, id: &str) -> Option<String> {
         match id {
             "usbhid" => {
@@ -920,10 +905,6 @@ impl D {
                 };
                 Some(format!("{}  |  {}  |  {}", st, pw.line(), dexhid_core::gadget::role_text(&roles).1))
             }
-            "bthid" => Some(match (&self.m3.sink, self.m3.target.as_str()) {
-                (Some(s), "bluetooth") => format!("active: {}", if s.connected() { "host connected" } else { "visible, waiting for a host to pair / connect" }),
-                _ => "off (pairing: from the other device, the desktop's Bluetooth agent confirms)".into(),
-            }),
             _ => None,
         }
     }
@@ -1104,7 +1085,6 @@ impl D {
             "target": self.m3.target,
             "setting": self.cfg.target,
             "usb_enabled": self.cfg.features.usbhid.enabled,
-            "bt_enabled": self.cfg.features.bthid.enabled,
             "sink": self.m3.sink.as_ref().map(|s| serde_json::json!({"kind": s.kind.name(), "info": s.info, "host": s.host, "connected": s.connected(), "sent": s.sent, "dropped_no_host": s.dropped_no_host})),
             "note": self.m3.sink_note,
             "legend_layout": self.sh.legend_layout.lock().unwrap().clone(),

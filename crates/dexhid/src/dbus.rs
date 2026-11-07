@@ -89,7 +89,7 @@ impl Api {
             Err(_) => Err(zbus::fdo::Error::Failed("daemon did not answer".into())),
         }
     }
-    /// M3: USB / Bluetooth HID state as JSON (target, helper, gadget, power, role)
+    /// M3: USB HID state as JSON (target, helper, gadget, power, role)
     fn hid_status(&self) -> zbus::fdo::Result<String> {
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.sh.send(Cmd::HidStatus(tx));

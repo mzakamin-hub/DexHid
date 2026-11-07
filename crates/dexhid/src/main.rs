@@ -10,8 +10,8 @@
 //!   dexhid set KEY [VALUE] | settings | quick ID                    (M2: settings registry, quick actions)
 //!   dexhid guardian --fd N [--hb-ms MS]                             (the key guardian; started by the daemon)
 //!   dexhid profile list|save NAME [monitor] [app=CLASS]|use NAME|auto|delete NAME   (M3 profiles)
-//!   dexhid act CMD.. | hid-status                                   (M3 feature actions, USB / BT HID state)
-//!   dexhid hid-helper [--socket P] [--allow-uid N]                  (M3 root helper of the USB / BT HID modes)
+//!   dexhid act CMD.. | hid-status                                   (M3 feature actions, USB HID state)
+//!   dexhid hid-helper [--socket P] [--allow-uid N]                  (M3 root helper of the USB HID mode)
 //!   dexhid --restore                                                (ExecStopPost: restores a dimmed panel)
 //!   dexhid version
 

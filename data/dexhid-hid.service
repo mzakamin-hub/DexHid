@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
-# DexHid M3: root helper (configfs USB gadget, Bluetooth HID profile + L2CAP). Started by dexhid-hid.socket; when
-# the user daemon goes away it releases every key / button on the far side and removes the gadget / profile.
+# DexHid M3: root helper (configfs USB gadget). Started by dexhid-hid.socket; when the user daemon goes away it
+# releases every key / button on the far side and removes the gadget.
 [Unit]
-Description=DexHid HID helper (USB gadget / Bluetooth HID for the tablet-as-keyboard modes)
+Description=DexHid HID helper (USB gadget for the tablet-as-keyboard mode)
 Requires=dexhid-hid.socket
-After=dexhid-hid.socket bluetooth.service
+After=dexhid-hid.socket
 
 [Service]
 ExecStart=/usr/bin/dexhid hid-helper
@@ -12,4 +12,4 @@ NoNewPrivileges=yes
 ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelModules=yes
-RestrictAddressFamilies=AF_UNIX AF_BLUETOOTH
+RestrictAddressFamilies=AF_UNIX
