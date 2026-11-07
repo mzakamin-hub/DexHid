@@ -93,6 +93,16 @@ pub fn kwin_apply(node: &str, props: &[(&str, Value)]) -> String {
     }
     let mut parts = vec![];
     for (p, v) in props {
+        // only real changes: KWin stores every Set in kcminputrc
+        let same = match (v, kwin_get(&c, &path, p)) {
+            (Value::Bool(b), Some(cur)) => bool::try_from(cur).ok() == Some(*b),
+            (Value::F64(f), Some(cur)) => f64::try_from(cur).map(|x| (x - f).abs() < 1e-6).unwrap_or(false),
+            _ => false,
+        };
+        if same {
+            parts.push(format!("{}=unchanged", p));
+            continue;
+        }
         let r = c.call_method(Some("org.kde.KWin"), path.as_str(), Some("org.freedesktop.DBus.Properties"), "Set", &("org.kde.KWin.InputDevice", *p, v));
         let back = kwin_get(&c, &path, p).map(|v| format!("{:?}", v)).unwrap_or_else(|| "?".into());
         parts.push(format!("{}={}{}", p, back.replace("OwnedValue(", "").trim_end_matches(')'), if r.is_err() { "(set failed)" } else { "" }));

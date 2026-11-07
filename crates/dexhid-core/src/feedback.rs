@@ -178,9 +178,59 @@ pub fn is_physical_keyboard(name: &str, bus: u16, has_letters: bool) -> bool {
     has_letters && bus != 0x06 && !name.starts_with("dexhid") && !name.contains("gpio-keys") && !name.contains("pmic")
 }
 
+/// a bit of a sysfs capability bitmap (`/sys/class/input/inputN/capabilities/key`: hex words, highest first,
+/// each word one `unsigned long` = 64 bits on arm64 / x86_64)
+pub fn caps_has(hex: &str, bit: usize) -> bool {
+    let words: Vec<&str> = hex.split_whitespace().collect();
+    let (w, b) = (bit / 64, bit % 64);
+    if w >= words.len() {
+        return false;
+    }
+    let s = words[words.len() - 1 - w];
+    u64::from_str_radix(s, 16).map(|v| v >> b & 1 == 1).unwrap_or(false)
+}
+
+/// physical keyboards from sysfs (readable without access to the event nodes): (name, bustype)
+pub fn sysfs_keyboards(class_input: &Path) -> Vec<(String, u16)> {
+    let mut v = vec![];
+    let Ok(rd_) = std::fs::read_dir(class_input) else { return v };
+    let mut ents: Vec<_> = rd_.flatten().map(|e| e.path()).filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("input"))).collect();
+    ents.sort();
+    for p in ents {
+        let name = rd(&p.join("name")).unwrap_or_default();
+        let bus = rd(&p.join("id/bustype")).and_then(|s| u16::from_str_radix(&s, 16).ok()).unwrap_or(0);
+        let caps = rd(&p.join("capabilities/key")).unwrap_or_default();
+        let letters = caps_has(&caps, 30) && caps_has(&caps, 44) && caps_has(&caps, 57);
+        if is_physical_keyboard(&name, bus, letters) {
+            v.push((name, bus));
+        }
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sysfs_keyboard_scan() {
+        // KEY_A (30), KEY_Z (44), KEY_SPACE (57) set in the lowest word
+        let low = (1u64 << 30) | (1u64 << 44) | (1u64 << 57);
+        assert!(caps_has(&format!("10000 0 {:x}", low), 57));
+        assert!(!caps_has(&format!("{:x}", 1u64 << 30), 44));
+        assert!(caps_has("1 0", 64));
+        let d = std::env::temp_dir().join(format!("dexhid-in-{}", std::process::id()));
+        for (n, name, bus, caps) in [("input3", "Keyboard Case", "0005", format!("0 {:x}", low)), ("input4", "dexhid keyboard", "0006", format!("{:x}", low)), ("input5", "gpio-keys", "0019", "e000000000000 0".to_string())] {
+            let p = d.join(n);
+            std::fs::create_dir_all(p.join("id")).unwrap();
+            std::fs::create_dir_all(p.join("capabilities")).unwrap();
+            std::fs::write(p.join("name"), format!("{}\n", name)).unwrap();
+            std::fs::write(p.join("id/bustype"), format!("{}\n", bus)).unwrap();
+            std::fs::write(p.join("capabilities/key"), format!("{}\n", caps)).unwrap();
+        }
+        assert_eq!(sysfs_keyboards(&d), vec![("Keyboard Case".to_string(), 5)]);
+        std::fs::remove_dir_all(&d).ok();
+    }
 
     #[test]
     fn wav_and_values() {

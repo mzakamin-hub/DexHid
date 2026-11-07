@@ -626,35 +626,20 @@ impl D {
     // ---------------------------------------------------------------- inputs: physical keyboards, pen
 
     fn scan_inputs(&mut self) {
-        let mut phys = None;
+        // keyboards from sysfs (no access to their event nodes needed); the pen through its uaccess node
+        let phys = feedback::sysfs_keyboards(std::path::Path::new("/sys/class/input")).into_iter().next().map(|k| k.0);
         let mut pen = None;
-        for p in event_nodes() {
-            let Ok(d) = Dev::open(&p, false) else { continue };
-            let n = d.name();
-            if !self.cfg.pen.is_empty() && n == self.cfg.pen {
-                pen = Some(d);
-                continue;
-            }
-            if phys.is_none() && feedback::is_physical_keyboard(&n, d.bustype(), d.has_key(30) && d.has_key(44) && d.has_key(57)) {
-                phys = Some(n);
-            }
+        if !self.cfg.pen.is_empty() && self.pen_dev.is_none() {
+            pen = find_dev(&self.cfg.pen).and_then(|p| Dev::open(&p, false).ok());
         }
         if phys != self.phys_kbd {
             println!("PHYS-KEYBOARD t={} {}", mono_ms(), phys.as_deref().map(|n| format!("attached name=\"{}\"", n)).unwrap_or_else(|| "none".into()));
             self.phys_kbd = phys;
             self.update_pad_only();
         }
-        match (&self.pen_dev, pen) {
-            (None, Some(d)) => {
-                println!("PEN-WATCH node={} name=\"{}\" grab=no", d.path, d.name());
-                self.pen_dev = Some(d);
-            }
-            (Some(_), None) => {
-                self.pen_dev = None;
-                let o = self.router.set_pen(false);
-                self.apply(o);
-            }
-            _ => {}
+        if let Some(d) = pen {
+            println!("PEN-WATCH node={} name=\"{}\" grab=no", d.path, d.name());
+            self.pen_dev = Some(d);
         }
     }
 
@@ -1379,7 +1364,10 @@ impl D {
                 evs.clear();
                 let ok = self.pen_dev.as_ref().map(|d| d.read_all(&mut evs).is_ok()).unwrap_or(false);
                 if !ok {
+                    println!("PEN-WATCH gone");
                     self.pen_dev = None;
+                    let o = self.router.set_pen(false);
+                    self.apply(o);
                 } else {
                     for ev in evs.clone() {
                         if ev.type_ == EV_KEY && ev.code == BTN_TOOL_PEN {

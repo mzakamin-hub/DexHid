@@ -11,6 +11,9 @@ KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinpu
 SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="NVTCapacitiveTouchScreen", ENV{DEXHID_INTERNAL}="1"
 SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="pmic_resin", ENV{DEXHID_CHORD}="1"
 SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="gpio-keys", ENV{DEXHID_CHORD}="1"
+# M2: the pen is read passively (its proximity pauses the touch input; never grabbed)
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="NVTCapacitivePen", ENV{DEXHID_PEN}="1"
 
 SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_TOUCHSCREEN}=="1", ENV{DEXHID_INTERNAL}=="1", TAG+="uaccess"
 SUBSYSTEM=="input", KERNEL=="event*", ENV{DEXHID_CHORD}=="1", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event*", ENV{DEXHID_PEN}=="1", TAG+="uaccess"
