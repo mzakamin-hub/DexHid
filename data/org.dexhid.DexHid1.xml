@@ -23,6 +23,15 @@
     <method name="GetSettings"><arg type="s" direction="out"/></method>
     <!-- M2: run a quick action by id (as if its button was tapped) -->
     <method name="RunQuick"><arg name="id" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <!-- M3: the focused window's class (DexHid's KWin script; per-app profiles) -->
+    <method name="ActiveApp"><arg name="class" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <!-- M3: profiles: "list" (JSON) | "save NAME [monitor] [app=CLASS ..]" | "use NAME" | "auto" | "delete NAME" -->
+    <method name="Profile"><arg name="command" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <!-- M3: a feature action, the same path as on the panel: "gesture NAME" | "emoji-panel" | "emoji E" | "clip N" |
+         "clips" | "suggest N" | "words PREFIX" | "select-mode" | "timer toggle|reset" | "laser X Y|up" | "type TEXT" -->
+    <method name="Act"><arg name="command" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <!-- M3: USB / Bluetooth HID state as JSON (target, sink, helper, power, data role) -->
+    <method name="HidStatus"><arg type="s" direction="out"/></method>
     <!-- tests without a monitor: only when the daemon runs with --debug, AccessDenied otherwise -->
     <method name="DebugConnector"><arg name="connected" type="b" direction="in"/><arg type="s" direction="out"/></method>
     <!-- debug only: log "DEBUG-NOTE <text>" (KWin test scripts report through it) -->

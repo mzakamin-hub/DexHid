@@ -3,6 +3,13 @@
 //! Written from scratch for DexHid; behaviour numbers cited from Denial's INPUT_DECK.md, no Denial code used.
 
 pub mod settings;
+// M3
+pub mod extras;
+pub mod gadget;
+pub mod gestures;
+pub mod hid;
+pub mod pen;
+pub mod profiles;
 pub mod quick;
 pub mod mouse;
 pub mod feedback;

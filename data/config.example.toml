@@ -101,6 +101,12 @@ laptop_pad_width = 100
 # KDE: Plasma panels move to the external monitor while in pad mode and come back on release / at the next start
 panels_follow = true
 
+# M3: where keys and the pointer go: "desktop" (this desktop), "usb" (the tablet is a USB keyboard + mouse for another
+# device: configfs gadget, needs the root helper `dexhid hid-helper`, dexhid-hid.socket), "bluetooth" (a Bluetooth
+# keyboard + mouse). The strip's target button switches between the enabled ones.
+target = "desktop"
+hid_helper_socket = "/run/dexhid/hid.sock"
+
 # Quick actions: which buttons show, in order ("id" or "id:2" for a double-size button). Built-in ids: copy paste
 # cut undo redo select_all find save alt_tab show_desktop overview close_window other_screen fullscreen screenshot
 # vol_down vol_up mute play_pause next prev mon_bright_up mon_bright_down (ddcutil) emoji (plasma-emojier).
@@ -117,8 +123,27 @@ actions = ["copy", "paste", "undo", "redo", "alt_tab", "show_desktop", "screensh
 # label = "Terminal"
 # command = ["konsole"]
 
-# Planned feature modules (stored now, acted on from M3): gestures, clipboard, textedit, remote, pen, suggest,
-# profiles, mirror, wireless. Example:
-# [features.gestures]
+# M3 feature modules: each has `enabled` and `options` (all also in the settings sheet / `dexhid set`).
+# [features.gestures]          # 3 / 4-finger swipes and taps -> actions (also on the touchpad)
 # enabled = true
-# options = { three_swipe = "desktop", four_swipe = "overview", three_tap = "middle-click" }
+# options = { swipe3_left = "desktop-right", swipe3_right = "desktop-left", swipe3_up = "overview", swipe3_down = "show-desktop",
+#             swipe4_left = "forward", swipe4_right = "back", swipe4_up = "app-switch", swipe4_down = "off",
+#             tap3 = "middle-click", tap4 = "quick:term" }   # any quick action, custom ones too: "quick:<id>"
+# [features.clipboard]         # history strip (Klipper on KDE, else wlr data-control; in memory only)
+# options = { items = 8, images = false }
+# [features.textedit]          # the textedit layout's select key + cursor joystick
+# options = { joystick = true, joystick_dead_mm = 3.0 }
+# [features.remote]            # laser pointer (layout remote: the pad = the monitor), talk timer in the strip
+# options = { laser = false, laser_highlight = true, timer_min = 0 }
+# [features.pen]               # pen on the external monitor: "pointer" (precise relative) or "tablet" (pressure / tilt)
+# options = { mode = "pointer", speed = 1.0 }
+# [features.suggest]           # word suggestions (local list + ~/.config/dexhid/words.txt) and the emoji panel
+# options = { words = true, count = 3, emoji_panel = true }
+# [features.profiles]          # ~/.config/dexhid/profiles/<name>/profile.toml: `dexhid profile save NAME [monitor] [app=CLASS]`
+# options = { per_app = false }
+# [features.mirror]            # preview of the monitor (xdg-desktop-portal ScreenCast + GStreamer pipewiresrc)
+# options = { fps = 2, size_pct = 35 }
+# [features.usbhid]            # keyboard language of the other device (xkb layout or layout(variant), "desktop")
+# options = { layout = "desktop", abs_pointer = false, stop_other = false, udc = "auto" }
+# [features.bthid]
+# options = { layout = "desktop", abs_pointer = false, discoverable_s = 120 }

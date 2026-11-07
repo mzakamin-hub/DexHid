@@ -62,6 +62,39 @@ impl Api {
         self.sh.send(Cmd::RunQuick(id.to_string()));
         "ok".into()
     }
+    /// M3: the focused window's class (sent by DexHid's KWin script for per-app profiles)
+    fn active_app(&self, class: &str) -> String {
+        let c: String = class.chars().take(200).filter(|c| !c.is_control()).collect();
+        self.sh.send(Cmd::ActiveApp(c));
+        "ok".into()
+    }
+    /// M3: profiles: "list" | "save NAME [monitor] [app=CLASS ..]" | "use NAME" | "auto" | "delete NAME"
+    fn profile(&self, cmd: &str) -> zbus::fdo::Result<String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.sh.send(Cmd::Profile(cmd.to_string(), tx));
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(zbus::fdo::Error::InvalidArgs(e)),
+            Err(_) => Err(zbus::fdo::Error::Failed("daemon did not answer".into())),
+        }
+    }
+    /// M3: run a feature action as its touch path would: "gesture NAME" | "emoji-panel" | "emoji E" | "clip N" |
+    /// "suggest N" | "select-mode" | "timer toggle|reset" | "laser X Y|up" | "target NAME" | "type TEXT" | "clips"
+    fn act(&self, cmd: &str) -> zbus::fdo::Result<String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.sh.send(Cmd::Act(cmd.to_string(), tx));
+        match rx.recv_timeout(std::time::Duration::from_secs(12)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(zbus::fdo::Error::InvalidArgs(e)),
+            Err(_) => Err(zbus::fdo::Error::Failed("daemon did not answer".into())),
+        }
+    }
+    /// M3: USB / Bluetooth HID state as JSON (target, helper, gadget, power, role)
+    fn hid_status(&self) -> zbus::fdo::Result<String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.sh.send(Cmd::HidStatus(tx));
+        rx.recv_timeout(std::time::Duration::from_secs(5)).map_err(|_| zbus::fdo::Error::Failed("daemon did not answer".into()))
+    }
     /// debug builds / `--debug` only: act as if an external display was (dis)connected (tests without a monitor)
     fn debug_connector(&self, connected: bool) -> zbus::fdo::Result<String> {
         if !self.sh.debug {
@@ -117,7 +150,7 @@ pub fn call(method: &str, arg: Option<&str>) -> Result<String, String> {
     }
     .map_err(|e| {
         let s = e.to_string();
-        let hint = if s.contains("ServiceUnknown") || s.contains("NameHasNoOwner") { " (is `dexhid daemon` running?)" } else { "" };
+        let hint = if s.contains("ServiceUnknown") || s.contains("NameHasNoOwner") || s.contains("was not provided") { " (is `dexhid daemon` running?)" } else { "" };
         format!("{}: {}{}", method, s, hint)
     })?;
     r.body().deserialize::<String>().map_err(|e| e.to_string())

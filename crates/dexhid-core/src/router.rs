@@ -69,6 +69,23 @@ pub struct RouterCfg {
     pub laptop: bool,
     /// laptop preset: touchpad width in % of the keyboard width
     pub laptop_pad_pct: f32,
+    // M3
+    /// gesture shortcuts: 3 / 4-finger swipes and taps are recognised here (also on the touchpad) -> Out::Gesture
+    pub gestures: bool,
+    /// text editing mode: the select key and the cursor joystick act
+    pub textedit: bool,
+    pub joy_dead_mm: f32,
+    /// presentation laser: touchpad contacts -> Out::Laser (absolute position in the pad)
+    pub laser: bool,
+    /// the clipboard band / the suggestion band under the strip
+    pub clip_band: bool,
+    pub suggest_band: bool,
+    /// an "Emoji" chip that opens the emoji panel
+    pub emoji: bool,
+    /// mirror preview size in % of the pad width (0 = off)
+    pub mirror_pct: f32,
+    /// the target button in the strip ("This desktop" / "USB" / "Bluetooth"), None = hidden
+    pub target_label: Option<String>,
 }
 
 impl Default for RouterCfg {
@@ -104,8 +121,41 @@ impl Default for RouterCfg {
             inertia: Inertia::default(),
             laptop: false,
             laptop_pad_pct: 100.0,
+            gestures: false,
+            textedit: false,
+            joy_dead_mm: 3.0,
+            laser: false,
+            clip_band: false,
+            suggest_band: false,
+            emoji: false,
+            mirror_pct: 0.0,
+            target_label: None,
         }
     }
+}
+
+/// M3: libinput's tap timeout is 180 ms; frozen touchpad fingers are lifted no earlier than this after they landed
+/// (a quicker lift of two stationary fingers would be a two-finger tap = right click)
+pub const TAP_GUARD_MS: i64 = 220;
+/// M3: band height under the strip (mm)
+pub const BAND_MM: f32 = 9.0;
+
+/// M3: a band of chips under the strip (clipboard history, word suggestions)
+#[derive(Clone, Debug, PartialEq)]
+pub struct BandView {
+    pub id: String,
+    pub rect: Rect,
+    pub chips: Vec<(String, Rect)>,
+    /// text shown when the band has no chips
+    pub empty: String,
+}
+
+/// M3: the emoji panel
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct EmojiView {
+    pub rect: Rect,
+    pub page: usize,
+    pub items: Vec<(String, Rect)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,6 +176,12 @@ pub enum Btn {
     SheetUp(u8),
     SheetPrev,
     SheetNext,
+    // M3
+    /// the strip's target button (desktop -> usb -> bluetooth)
+    Target,
+    /// emoji panel: category tab i, emoji i
+    EmojiTab(u8),
+    Emoji(u8),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -213,6 +269,15 @@ pub struct UiModel {
     pub fn_on: bool,
     /// a short notice in the strip (pen pause, pad only, ...)
     pub notice: String,
+    // M3
+    pub bands: Vec<BandView>,
+    pub emoji: Option<EmojiView>,
+    /// mirror preview rect (the UI draws the latest frame into it)
+    pub mirror: Option<Rect>,
+    /// text editing: select-while-moving is on
+    pub select: bool,
+    /// the touchpad is the laser pointer area
+    pub laser: bool,
     // dynamic part
     pub lit_keys: Vec<usize>,
     pub lit_button: Option<Btn>,
@@ -249,6 +314,18 @@ pub enum Out {
     Swipe(String),
     /// M2.1: set a setting to a value (edit mode from the laptop preset switches to free placement)
     SetSetting(String, String),
+    /// M3: a gesture shortcut was recognised ("swipe3_left", "tap3", ...)
+    Gesture(String),
+    /// M3: a chip of a band was tapped (band id, index)
+    Chip(String, usize),
+    /// M3: an emoji of the panel was tapped
+    Emoji(String),
+    /// M3: laser pointer position in the pad (0..1), None = lifted
+    Laser(Option<(f32, f32)>),
+    /// M3: talk timer "toggle" / "reset"
+    Timer(String),
+    /// M3: the strip's target button
+    TargetNext,
     /// static model changed (full redraw), dynamic changed (pressed keys / dots)
     Static,
     Dynamic,
@@ -266,6 +343,15 @@ enum Owner {
     /// M2.1: a participant of a recognised whole-screen swipe (synthetic finger index)
     Swipe(usize),
     Ignored,
+    // M3
+    /// a finger of a (possible) gesture shortcut: captured, nothing goes out until it lifts
+    Gesture,
+    /// the text-editing joystick: the arrow repeating now and when the next one is due
+    Joystick { key: Option<u16>, iv: i64, next: i64 },
+    /// a chip of a band (band index, chip index)
+    Chip(usize, usize),
+    /// the presentation laser on the touchpad
+    Laser,
 }
 
 /// M2.1: the synthetic touchpad fingers of a recognised whole-screen swipe
@@ -286,6 +372,8 @@ struct Track {
     x0: f32,
     y0: f32,
     owner: Owner,
+    /// M3: when it landed
+    t0: i64,
 }
 
 pub struct Router {
@@ -320,6 +408,15 @@ pub struct Router {
     swipe: Swipe,
     synth: Option<Synth>,
     desk: Option<crate::feedback::DeskLook>,
+    // M3
+    taps: crate::gestures::Taps,
+    /// frozen touchpad fingers are lifted at this time (tap guard)
+    pad_lift_at: Option<i64>,
+    select: bool,
+    clips: Vec<String>,
+    suggestions: Vec<String>,
+    emoji_page: Option<usize>,
+    mirror_src: (u32, u32),
 }
 
 impl Router {
@@ -329,7 +426,7 @@ impl Router {
         keys.long_ms = cfg.long_ms;
         keys.sticky = cfg.sticky;
         keys.mask = cfg.mask_key;
-        let swipe = Swipe::new(SwipeCfg { enabled: cfg.swipe, ..Default::default() });
+        let swipe = Swipe::new(SwipeCfg { enabled: cfg.swipe || cfg.gestures, ..Default::default() });
         Router {
             cfg,
             geo: None,
@@ -361,7 +458,122 @@ impl Router {
             swipe,
             synth: None,
             desk: None,
+            taps: crate::gestures::Taps::new(Default::default()),
+            pad_lift_at: None,
+            select: false,
+            clips: vec![],
+            suggestions: vec![],
+            emoji_page: None,
+            mirror_src: (1920, 1080),
         }
+    }
+
+    // ---------------------------------------------------------------- M3 setters
+
+    /// the clipboard band's labels (newest first)
+    pub fn set_clips(&mut self, v: Vec<String>) -> Vec<Out> {
+        if self.clips == v {
+            return vec![];
+        }
+        self.clips = v;
+        self.relayout()
+    }
+
+    /// the current word suggestions
+    pub fn set_suggestions(&mut self, v: Vec<String>) -> Vec<Out> {
+        if self.suggestions == v {
+            return vec![];
+        }
+        self.suggestions = v;
+        self.relayout()
+    }
+
+    /// the mirrored monitor's size (the preview keeps its aspect)
+    pub fn set_mirror_src(&mut self, w: u32, h: u32) -> Vec<Out> {
+        if self.mirror_src == (w, h) {
+            return vec![];
+        }
+        self.mirror_src = (w, h);
+        self.relayout()
+    }
+
+    pub fn select_mode(&self) -> bool {
+        self.select
+    }
+
+    /// select-while-moving on / off (the select key; D-Bus Act)
+    pub fn toggle_select(&mut self) -> Vec<Out> {
+        let mut out = vec![];
+        self.key_outs(vec![KeyOut::Action(Action::SelectMode)], 0, &mut out);
+        out
+    }
+
+    pub fn emoji_open(&self) -> bool {
+        self.emoji_page.is_some()
+    }
+
+    /// open / close the emoji panel (also the quick action / D-Bus)
+    pub fn toggle_emoji(&mut self) -> Vec<Out> {
+        let mut out = vec![];
+        self.emoji_page = if self.emoji_page.is_some() { None } else { Some(0) };
+        if self.emoji_page.is_some() {
+            self.sheet_open = false;
+        }
+        out.push(Out::PanelOpen(self.emoji_page.is_some()));
+        out.extend(self.relayout());
+        out
+    }
+
+    /// a button click on the touchpad (gesture action "middle-click"), fingers kept where they are
+    pub fn pad_click(&mut self, btn: u16) -> Vec<Out> {
+        self.pad.as_mut().map(|p| p.click(btn).into_iter().map(Out::Pad).collect()).unwrap_or_default()
+    }
+
+    /// a key tap that respects select-while-moving (Shift around caret keys)
+    fn nav_tap(&mut self, code: u16, out: &mut Vec<Out>) {
+        let shift = self.select && crate::extras::is_nav(code);
+        if shift {
+            out.push(Out::Key(keycodes::KEY_LEFTSHIFT, true));
+        }
+        out.push(Out::Key(code, true));
+        out.push(Out::Key(code, false));
+        if shift {
+            out.push(Out::Key(keycodes::KEY_LEFTSHIFT, false));
+        }
+        out.push(Out::KeyFeedback);
+    }
+
+    /// M3 gesture mode: three or more fingers landed together (or a third finger on the touchpad): capture them
+    fn capture_gesture(&mut self, t: i64, out: &mut Vec<Out>, min: usize) {
+        let ids: Vec<ContactId> = self.contacts.iter().filter(|(_, c)| matches!(c.owner, Owner::Pad | Owner::Key | Owner::Quick(_))).map(|(i, _)| *i).collect();
+        if ids.len() < min.max(1) {
+            return;
+        }
+        // keys: pending taps are cancelled, pressed keys released (with the modifier mask)
+        let v = self.keys.release_all();
+        self.key_outs(v, t, out);
+        // touchpad fingers freeze; they lift once libinput can no longer take them for a tap
+        let first_pad = self.contacts.values().filter(|c| matches!(c.owner, Owner::Pad)).map(|c| c.t0).min();
+        if let Some(p) = self.pad.as_mut() {
+            if p.coasting() {
+                p.stop_coast();
+            }
+        }
+        match first_pad {
+            Some(t0) if t < t0 + TAP_GUARD_MS => self.pad_lift_at = Some(t0 + TAP_GUARD_MS),
+            Some(_) => {
+                if let Some(f) = self.pad.as_mut().and_then(|p| p.release_all()) {
+                    out.push(Out::Pad(f));
+                }
+            }
+            None => {}
+        }
+        for id in &ids {
+            if let Some(c) = self.contacts.get_mut(id) {
+                c.owner = Owner::Gesture;
+            }
+        }
+        out.push(Out::Note(format!("gesture: {} fingers captured", ids.len())));
     }
 
     /// M2.1: the desktop's look (theme "desktop")
@@ -429,7 +641,13 @@ impl Router {
         self.keys.long_ms = cfg.long_ms;
         self.keys.sticky = cfg.sticky;
         self.keys.mask = cfg.mask_key;
-        self.swipe.cfg.enabled = cfg.swipe;
+        self.swipe.cfg.enabled = cfg.swipe || cfg.gestures;
+        if !cfg.textedit {
+            self.select = false;
+        }
+        if !cfg.emoji {
+            self.emoji_page = None;
+        }
         self.cfg = cfg;
         out.extend(self.relayout());
         out
@@ -547,7 +765,81 @@ impl Router {
     fn work_area(&self) -> (Rect, Rect) {
         let g = self.geo.unwrap();
         let sh = (self.cfg.strip_mm * g.px_per_mm()).round().min(g.h / 4.0);
-        (Rect::new(0.0, 0.0, g.w, sh), Rect::new(0.0, sh, g.w, g.h - sh))
+        // M3: the bands (suggestions, clipboard) sit between the strip and the areas
+        let bh = self.band_ids().len() as f32 * (BAND_MM * g.px_per_mm()).round();
+        (Rect::new(0.0, 0.0, g.w, sh), Rect::new(0.0, sh + bh, g.w, g.h - sh - bh))
+    }
+
+    /// M3: the bands shown (in order from the top)
+    fn band_ids(&self) -> Vec<&'static str> {
+        let mut v = vec![];
+        if self.cfg.suggest_band || self.cfg.emoji {
+            v.push("suggest");
+        }
+        if self.cfg.clip_band {
+            v.push("clip");
+        }
+        v
+    }
+
+    fn place_bands(&self, strip: &Rect, ppm: f32) -> Vec<BandView> {
+        let bh = (BAND_MM * ppm).round();
+        let gap = 1.0 * ppm;
+        let mut out = vec![];
+        for (i, id) in self.band_ids().into_iter().enumerate() {
+            let r = Rect::new(0.0, strip.bottom() + i as f32 * bh, strip.w, bh);
+            let mut labels: Vec<String> = vec![];
+            let mut empty = String::new();
+            match id {
+                "suggest" => {
+                    if self.cfg.emoji {
+                        labels.push("\u{263a} Emoji".into());
+                    }
+                    labels.extend(self.suggestions.iter().cloned());
+                    if self.suggestions.is_empty() && self.cfg.suggest_band {
+                        empty = "suggestions appear while you type".into();
+                    }
+                }
+                _ => {
+                    labels.extend(self.clips.iter().cloned());
+                    if labels.is_empty() {
+                        empty = "clipboard history: copy something".into();
+                    }
+                }
+            }
+            let n = labels.len().max(1) as f32;
+            let cw = ((r.w - gap) / n.max(if id == "clip" { 5.0 } else { 4.0 })).min(70.0 * ppm);
+            let chips = labels.into_iter().enumerate().map(|(j, l)| (l, Rect::new(r.x + gap + j as f32 * cw, r.y + gap / 2.0, cw - gap, r.h - gap))).collect();
+            out.push(BandView { id: id.into(), rect: r, chips, empty });
+        }
+        out
+    }
+
+    fn place_emoji(&self, area: &Rect, ppm: f32, page: usize, buttons: &mut Vec<ButtonView>) -> EmojiView {
+        let pw = (220.0 * ppm).min(area.w - 4.0 * ppm);
+        let ph = (area.h - 4.0 * ppm).max(40.0 * ppm);
+        let p = Rect::new(area.x + (area.w - pw) / 2.0, area.y + 2.0 * ppm, pw, ph);
+        let m = 2.0 * ppm;
+        let th = 9.0 * ppm;
+        let cats = crate::extras::EMOJI;
+        let tw = (pw - 2.0 * m - 30.0 * ppm) / cats.len() as f32;
+        for (i, c) in cats.iter().enumerate() {
+            buttons.push(Self::btn(Btn::EmojiTab(i as u8), Rect::new(p.x + m + i as f32 * tw, p.y + m, tw - ppm, th), c.0, format!("emoji.tab.{}", i)));
+        }
+        buttons.push(Self::btn(Btn::PanelClose, Rect::new(p.right() - m - 28.0 * ppm, p.y + m, 28.0 * ppm, th), "Close", "panel.close".into()));
+        let items = crate::extras::emoji_page(page);
+        let gy = p.y + m + th + m;
+        let cols = ((pw - 2.0 * m) / (14.0 * ppm)).floor().max(1.0) as usize;
+        let cell = (pw - 2.0 * m) / cols as f32;
+        let rows = items.len().div_ceil(cols).max(1);
+        let ch = ((p.bottom() - m - gy) / rows as f32).min(cell);
+        let mut v = vec![];
+        for (i, e) in items.into_iter().enumerate() {
+            let r = Rect::new(p.x + m + (i % cols) as f32 * cell, gy + (i / cols) as f32 * ch, cell - ppm, ch - ppm);
+            buttons.push(Self::btn(Btn::Emoji(i as u8), r, &e, format!("emoji.item.{}", i)));
+            v.push((e, r));
+        }
+        EmojiView { rect: p, page, items: v }
     }
 
     fn mins(&self) -> HashMap<String, (f32, f32)> {
@@ -638,7 +930,8 @@ impl Router {
         self.sheet_keys.clear();
         if let Some(md) = self.sheet.get(self.sheet_tab).cloned() {
             view.title = md.title.clone();
-            view.subtitle = if md.live { String::new() } else { format!("planned ({}): settings are stored now", md.plan) };
+            // M3: a live module may carry a status line (USB / Bluetooth HID: power, data role, host)
+            view.subtitle = if md.live { md.plan.clone() } else { format!("planned ({}): settings are stored now", md.plan) };
             let pages = md.rows.len().div_ceil(per_page).max(1);
             self.sheet_page = self.sheet_page.min(pages - 1);
             let first = self.sheet_page * per_page;
@@ -767,12 +1060,16 @@ impl Router {
         let specs: Vec<(Btn, f32, String, &str)> = if self.edit {
             vec![(Btn::Cancel, 24.0, "Cancel".into(), "strip.cancel"), (Btn::Reset, 24.0, "Reset".into(), "strip.reset"), (Btn::Done, 24.0, "Done".into(), "strip.done")]
         } else {
-            vec![
+            let mut v = vec![
                 (Btn::Exit, 18.0, "Exit".into(), "strip.exit"),
                 (Btn::Settings, 26.0, "Settings".into(), "strip.settings"),
                 (Btn::Layout, 40.0, format!("Keyboard: {}", self.layout.title), "strip.layout"),
                 (Btn::Display, 36.0, "Use as display".into(), "strip.display"),
-            ]
+            ];
+            if let Some(t) = &self.cfg.target_label {
+                v.push((Btn::Target, 34.0, t.clone(), "strip.target"));
+            }
+            v
         };
         let mut x = strip.right() - m;
         for (b, wmm, label, name) in specs {
@@ -782,6 +1079,13 @@ impl Router {
             x -= m;
         }
         let sheet = if self.sheet_open && !self.edit { Some(self.place_sheet(&area, ppm, &mut buttons)) } else { None };
+        // M3: bands, the emoji panel, the mirror preview
+        let bands = if self.edit { vec![] } else { self.place_bands(&strip, ppm) };
+        let emoji = match self.emoji_page {
+            Some(pg) if !self.edit && sheet.is_none() => Some(self.place_emoji(&area, ppm, pg, &mut buttons)),
+            _ => None,
+        };
+        let mirror = if self.cfg.mirror_pct > 0.0 && !self.edit { Some(crate::extras::mirror_rect(&pad_rect, self.mirror_src.0, self.mirror_src.1, self.cfg.mirror_pct, 2.0 * ppm)) } else { None };
         let zones = if self.edit { PadMapper::new(pad_rect, upp, zone).zones() } else { self.pad.as_ref().and_then(|p| p.zones()) };
         let version = self.model.version + 1;
         let notice = if self.pen && self.cfg.pen_pause { "pen near: touches paused".to_string() } else { self.notice.clone() };
@@ -811,6 +1115,11 @@ impl Router {
             latched: self.keys.latched(),
             fn_on: self.keys.fn_active(),
             notice,
+            bands,
+            emoji,
+            mirror,
+            select: self.select,
+            laser: self.cfg.laser,
             lit_keys: self.keys.lit_keys(),
             lit_button: None,
             lit_quick: None,
@@ -871,8 +1180,31 @@ impl Router {
                         }
                         out.push(Out::KeyFeedback);
                     }
-                    out.push(Out::Key(c, p))
+                    // M3 select-while-moving: Shift around the caret keys
+                    let shift = self.select && crate::extras::is_nav(c);
+                    if shift && p {
+                        out.push(Out::Key(keycodes::KEY_LEFTSHIFT, true));
+                    }
+                    out.push(Out::Key(c, p));
+                    if shift && !p {
+                        out.push(Out::Key(keycodes::KEY_LEFTSHIFT, false));
+                    }
                 }
+                KeyOut::Action(Action::SelectMode) => {
+                    if self.cfg.textedit {
+                        self.select = !self.select;
+                        out.push(Out::Note(format!("select mode {}", if self.select { "on" } else { "off" })));
+                        out.extend(self.relayout());
+                    }
+                }
+                KeyOut::Action(Action::Joystick) => {}
+                KeyOut::Action(Action::EmojiPanel) => {
+                    if self.cfg.emoji {
+                        out.extend(self.toggle_emoji());
+                    }
+                }
+                KeyOut::Action(Action::Timer(s)) => out.push(Out::Timer(s)),
+                KeyOut::Action(Action::Laser) => out.push(Out::SetSetting("features.remote.options.laser".into(), (!self.cfg.laser).to_string())),
                 KeyOut::Action(Action::Page(id)) => {
                     self.page = id;
                     out.extend(self.relayout());
@@ -898,7 +1230,7 @@ impl Router {
             let mut v: Vec<(ContactId, f32, f32)> = self
                 .contacts
                 .iter()
-                .filter(|(_, t)| matches!(t.owner, Owner::Strip { .. } | Owner::Pad | Owner::Key | Owner::Quick(_)))
+                .filter(|(_, t)| matches!(t.owner, Owner::Strip { .. } | Owner::Pad | Owner::Key | Owner::Quick(_) | Owner::Gesture))
                 .map(|(id, t)| (*id, t.x, t.y))
                 .collect();
             v.sort_by_key(|x| x.0);
@@ -936,6 +1268,18 @@ impl Router {
     /// the same number of synthetic fingers on the virtual touchpad so libinput recognises the desktop's gesture
     fn start_swipe(&mut self, r: crate::swipe::Recognised, t: i64, out: &mut Vec<Out>) {
         let n = r.ids.len();
+        // M3 gesture shortcuts: the gesture is ours (on the touchpad too); nothing is handed to the desktop
+        if self.cfg.gestures {
+            self.capture_gesture(t, out, 1);
+            for tr in self.contacts.values_mut() {
+                tr.owner = Owner::Ignored;
+            }
+            self.taps.spoil();
+            let name = crate::gestures::swipe_name(n, r.dir);
+            out.push(Out::Swipe(format!("gesture {} fingers={} dir={:.2},{:.2}", name, n, r.dir.0, r.dir.1)));
+            out.push(Out::Gesture(name));
+            return;
+        }
         if r.ids.iter().all(|id| matches!(self.contacts.get(id).map(|c| &c.owner), Some(Owner::Pad))) {
             out.push(Out::Swipe(format!("native fingers={} (all on the touchpad: libinput's own gesture)", n)));
             return;
@@ -999,7 +1343,18 @@ impl Router {
                     }
                 }
                 let owner = if self.swipe.phase() == Phase::Active { Owner::Ignored } else { self.owner_for_down(id, lx, ly, major, t, &mut out) };
-                self.contacts.insert(id, Track { x: lx, y: ly, x0: lx, y0: ly, owner });
+                let eligible = matches!(owner, Owner::Pad | Owner::Key | Owner::Quick(_));
+                self.contacts.insert(id, Track { x: lx, y: ly, x0: lx, y0: ly, owner, t0: t });
+                // M3 gesture shortcuts: 3+ fingers that land together, or a third finger on the touchpad
+                if self.cfg.gestures && eligible && !self.edit && !self.sheet_open {
+                    self.taps.cfg.slop_px = 3.0 * g.px_per_mm();
+                    self.taps.down(id, lx, ly, t);
+                    let on_pad = self.contacts.values().filter(|c| matches!(c.owner, Owner::Pad)).count();
+                    let capturing = self.contacts.values().any(|c| matches!(c.owner, Owner::Gesture));
+                    if self.taps.landing(t) || on_pad >= 3 || capturing {
+                        self.capture_gesture(t, &mut out, 1);
+                    }
+                }
                 if self.cfg.five_finger && self.contacts.len() >= 5 && self.five.is_none() && !self.five_blocked {
                     self.five = Some((t, false));
                 }
@@ -1025,12 +1380,40 @@ impl Router {
                     self.five = None;
                     self.five_blocked = true;
                 }
+                if self.cfg.gestures {
+                    self.taps.moved(id, lx, ly);
+                }
                 match tr.owner {
                     Owner::Pad => {
                         if let Some(p) = self.pad.as_mut() {
                             p.motion(id, lx, ly, t);
                         }
                         self.pad_frame(&mut out);
+                    }
+                    Owner::Laser => {
+                        if let Some(p) = self.pad.as_ref() {
+                            out.push(Out::Laser(Some(((lx - p.rect.x) / p.rect.w, (ly - p.rect.y) / p.rect.h))));
+                        }
+                    }
+                    Owner::Joystick { key, .. } => {
+                        let j = crate::extras::joystick((lx - tr.x0) / ppm, (ly - tr.y0) / ppm, self.cfg.joy_dead_mm);
+                        let nk = j.map(|x| x.0);
+                        if nk != key {
+                            if let Some((k, iv)) = j {
+                                self.nav_tap(k, &mut out);
+                                if let Some(Track { owner: Owner::Joystick { key, iv: i, next }, .. }) = self.contacts.get_mut(&id) {
+                                    *key = Some(k);
+                                    *i = iv;
+                                    *next = t + iv;
+                                }
+                            } else if let Some(Track { owner: Owner::Joystick { key, .. }, .. }) = self.contacts.get_mut(&id) {
+                                *key = None;
+                            }
+                        } else if let (Some(_), Some((_, iv))) = (key, j) {
+                            if let Some(Track { owner: Owner::Joystick { iv: i, .. }, .. }) = self.contacts.get_mut(&id) {
+                                *i = iv;
+                            }
+                        }
                     }
                     Owner::Key => {
                         // off the key = outside its rect grown by the slop (hysteresis at the key edges)
@@ -1073,8 +1456,30 @@ impl Router {
             }
             Contact::Up { id } => {
                 let Some(tr) = self.contacts.remove(&id) else { return out };
+                if self.cfg.gestures {
+                    if let Some(n) = self.taps.up(id, t) {
+                        out.push(Out::Swipe(format!("gesture tap{} fingers={}", n, n)));
+                        out.push(Out::Gesture(format!("tap{}", n)));
+                    }
+                }
                 match tr.owner {
                     Owner::Swipe(_) => self.end_synth(&mut out, "a finger lifted"),
+                    Owner::Laser => out.push(Out::Laser(None)),
+                    Owner::Chip(b, i) => {
+                        if let Some(band) = self.model.bands.get(b).cloned() {
+                            if band.chips.get(i).is_some_and(|c| c.1.contains(tr.x, tr.y)) {
+                                if band.id == "suggest" && self.cfg.emoji {
+                                    if i == 0 {
+                                        out.extend(self.toggle_emoji());
+                                    } else {
+                                        out.push(Out::Chip(band.id.clone(), i - 1));
+                                    }
+                                } else {
+                                    out.push(Out::Chip(band.id.clone(), i));
+                                }
+                            }
+                        }
+                    }
                     Owner::Strip { btn: Some(b), long: false, .. } => {
                         if self.hit_button(tr.x, tr.y) == Some(b) {
                             self.fire(b, &mut out);
@@ -1145,7 +1550,7 @@ impl Router {
 
     fn owner_for_down(&mut self, id: ContactId, x: f32, y: f32, major: i32, t: i64, out: &mut Vec<Out>) -> Owner {
         let strip = self.model.strip;
-        if self.sheet_open && !self.edit {
+        if (self.sheet_open || self.emoji_page.is_some()) && !self.edit {
             if let Some(b) = self.hit_button(x, y) {
                 return if strip.contains(x, y) { Owner::Strip { btn: Some(b), t0: t, long: false } } else { Owner::Button(b) };
             }
@@ -1176,6 +1581,15 @@ impl Router {
             return Owner::Ignored;
         }
         let palm = self.cfg.palm_major > 0 && major > self.cfg.palm_major;
+        // M3: band chips (suggestions, clipboard)
+        for (bi, b) in self.model.bands.iter().enumerate() {
+            if b.rect.contains(x, y) {
+                return match b.chips.iter().position(|c| c.1.contains(x, y)) {
+                    Some(ci) if !palm => Owner::Chip(bi, ci),
+                    _ => Owner::Ignored,
+                };
+            }
+        }
         for r in &self.model.regions {
             if !r.rect.contains(x, y) {
                 continue;
@@ -1184,6 +1598,14 @@ impl Router {
                 if palm {
                     out.push(Out::Note(format!("palm: contact {} ignored (major {})", id, major)));
                     return Owner::Ignored;
+                }
+                // M3 presentation laser: the pad is an absolute pointer area (one finger)
+                if self.cfg.laser {
+                    if self.contacts.values().any(|c| matches!(c.owner, Owner::Laser)) {
+                        return Owner::Ignored;
+                    }
+                    out.push(Out::Laser(Some(((x - r.rect.x) / r.rect.w, (y - r.rect.y) / r.rect.h))));
+                    return Owner::Laser;
                 }
                 if self.cfg.dwt_ms > 0 && t - self.last_key_t < self.cfg.dwt_ms {
                     out.push(Out::Note(format!("dwt: pad contact {} ignored ({} ms after a key)", id, t - self.last_key_t)));
@@ -1209,6 +1631,9 @@ impl Router {
             }
             if let Some(k) = self.hit_key(x, y) {
                 let kind = self.model.keys[k].kind.clone();
+                if kind == KeyKind::Action(Action::Joystick) {
+                    return if self.cfg.textedit { Owner::Joystick { key: None, iv: 400, next: i64::MAX / 2 } } else { Owner::Ignored };
+                }
                 let long = self.model.keys[k].long.clone();
                 let v = self.keys.down(id, k, &kind, long.as_ref(), t, (x, y));
                 self.key_outs(v, t, out);
@@ -1265,8 +1690,19 @@ impl Router {
             }
             Btn::PanelClose => {
                 self.sheet_open = false;
+                self.emoji_page = None;
                 out.push(Out::PanelOpen(false));
                 out.extend(self.relayout());
+            }
+            Btn::Target => out.push(Out::TargetNext),
+            Btn::EmojiTab(i) => {
+                self.emoji_page = Some(i as usize);
+                out.extend(self.relayout());
+            }
+            Btn::Emoji(i) => {
+                if let Some(e) = self.model.emoji.as_ref().and_then(|v| v.items.get(i as usize)) {
+                    out.push(Out::Emoji(e.0.clone()));
+                }
             }
             Btn::SheetTab(i) => {
                 self.sheet_tab = i as usize;
@@ -1325,6 +1761,29 @@ impl Router {
             p.tick(t);
         }
         self.pad_frame(&mut out);
+        // M3: frozen gesture fingers leave the touchpad after the tap guard
+        if self.pad_lift_at.is_some_and(|at| t >= at) {
+            self.pad_lift_at = None;
+            if let Some(f) = self.pad.as_mut().and_then(|p| p.release_all()) {
+                out.push(Out::Pad(f));
+                out.push(Out::Note("gesture: frozen touchpad fingers lifted".into()));
+            }
+        }
+        // M3: joystick repeats
+        let due: Vec<(ContactId, u16, i64)> = self
+            .contacts
+            .iter()
+            .filter_map(|(id, c)| match c.owner {
+                Owner::Joystick { key: Some(k), iv, next } if t >= next => Some((*id, k, iv)),
+                _ => None,
+            })
+            .collect();
+        for (id, k, iv) in due {
+            self.nav_tap(k, &mut out);
+            if let Some(Track { owner: Owner::Joystick { next, .. }, .. }) = self.contacts.get_mut(&id) {
+                *next = t + iv;
+            }
+        }
         // the swipe's travel before recognition, in steps of at most 2.5 mm every 8 ms
         let step = 2.5 * self.cfg.pad_units_per_mm;
         if let Some((d, next)) = self.synth.as_ref().filter(|s| !s.lifted && (s.catch.0 != 0.0 || s.catch.1 != 0.0)).map(|s| (s.catch, s.next)) {
@@ -1365,9 +1824,12 @@ impl Router {
 
     pub fn next_deadline(&self) -> Option<i64> {
         let mut d = self.keys.next_deadline();
+        let joy = self.contacts.values().filter_map(|c| if let Owner::Joystick { key: Some(_), next, .. } = c.owner { Some(next) } else { None }).min();
         let extra = [
             self.pad.as_ref().and_then(|p| p.next_deadline()),
             self.synth.as_ref().filter(|s| !s.lifted && (s.catch.0 != 0.0 || s.catch.1 != 0.0)).map(|s| s.next),
+            self.pad_lift_at,
+            joy,
         ];
         for x in extra.into_iter().flatten() {
             d = Some(d.map_or(x, |y| y.min(x)));
@@ -1398,11 +1860,16 @@ impl Router {
             out.push(Out::Pad(f));
         }
         self.end_synth(&mut out, "release");
+        self.pad_lift_at = None;
+        if self.contacts.values().any(|c| matches!(c.owner, Owner::Laser)) {
+            out.push(Out::Laser(None));
+        }
         for tr in self.contacts.values_mut() {
-            if matches!(tr.owner, Owner::Pad | Owner::Key | Owner::Quick(_) | Owner::Swipe(_)) {
+            if matches!(tr.owner, Owner::Pad | Owner::Key | Owner::Quick(_) | Owner::Swipe(_) | Owner::Gesture | Owner::Joystick { .. } | Owner::Chip(..) | Owner::Laser) {
                 tr.owner = Owner::Ignored;
             }
         }
+        self.taps.spoil();
         out
     }
 
@@ -1410,6 +1877,7 @@ impl Router {
     pub fn reset_contacts(&mut self) -> Vec<Out> {
         let mut out = self.release_all();
         self.contacts.clear();
+        self.taps = crate::gestures::Taps::new(self.taps.cfg.clone());
         self.swipe.reset();
         self.synth = None;
         self.five = None;
@@ -1441,6 +1909,15 @@ impl Router {
         for q in &self.model.quick {
             line(&format!("quick.{}", q.id), &q.rect);
         }
+        for b in &self.model.bands {
+            line(&format!("band.{}", b.id), &b.rect);
+            for (i, (_, r)) in b.chips.iter().enumerate() {
+                line(&format!("chip.{}.{}", b.id, i), r);
+            }
+        }
+        if let Some(m) = &self.model.mirror {
+            line("mirror", m);
+        }
         let mut seen = HashSet::new();
         for k in &self.model.keys {
             let n = match &k.kind {
@@ -1450,6 +1927,11 @@ impl Router {
                 KeyKind::Action(Action::LayoutNext) => "key.layout:next".into(),
                 KeyKind::Action(Action::KeyboardHide) => "key.keyboard:hide".into(),
                 KeyKind::Action(Action::Fn) => "key.fn".into(),
+                KeyKind::Action(Action::SelectMode) => "key.select:toggle".into(),
+                KeyKind::Action(Action::Joystick) => "key.joystick".into(),
+                KeyKind::Action(Action::EmojiPanel) => "key.emoji:panel".into(),
+                KeyKind::Action(Action::Timer(s)) => format!("key.timer:{}", s),
+                KeyKind::Action(Action::Laser) => "key.laser:toggle".into(),
                 KeyKind::Gap => continue,
             };
             if seen.insert(n.clone()) {
@@ -1792,9 +2274,10 @@ mod tests {
         assert!(tap(&mut r, 4, "sheet.row.natural_scroll", 300).contains(&Out::SettingStep("natural_scroll".into(), 1)));
         assert!(tap(&mut r, 5, "sheet.minus.speed", 400).contains(&Out::SettingStep("speed".into(), -1)));
         assert!(tap(&mut r, 6, "sheet.plus.speed", 500).contains(&Out::SettingStep("speed".into(), 1)));
-        // a planned module is marked
+        // M3: the gestures module is live (no "planned" note), its rows are paged
         tap(&mut r, 7, "sheet.tab.gestures", 600);
-        assert!(r.model().sheet.as_ref().unwrap().subtitle.contains("planned"));
+        assert!(r.model().sheet.as_ref().unwrap().subtitle.is_empty());
+        assert!(r.model().buttons.iter().any(|b| b.name == "sheet.row.features.gestures.options.swipe3_left"));
         // touches on the pad under the sheet do nothing
         let o = dn(&mut r, 8, "region.touchpad", 700);
         assert!(!o.iter().any(|x| matches!(x, Out::Pad(_))));
@@ -2156,5 +2639,195 @@ mod tests {
         let c = at(&r, "region.touchpad");
         let o = down(&mut r, 1, c, 0);
         assert!(o.iter().any(|x| matches!(x, Out::Pad(_))));
+    }
+
+    // ------------------------------------------------------------------------------------------------ M3
+
+    fn gestures_of(o: &[Out]) -> Vec<String> {
+        o.iter().filter_map(|x| if let Out::Gesture(s) = x { Some(s.clone()) } else { None }).collect()
+    }
+
+    fn router_cfg(n: &str, f: impl Fn(&mut RouterCfg)) -> Router {
+        let mut c = RouterCfg::default();
+        f(&mut c);
+        let mut r = Router::new(c, layout(n));
+        r.set_geometry(geo());
+        r
+    }
+
+    #[test]
+    fn m3_gesture_swipe_over_keys_and_on_the_pad() {
+        let mut r = router_cfg("full", |c| c.gestures = true);
+        let pts = [at(&r, "key.KEY_Q"), at(&r, "key.KEY_W"), at(&r, "key.KEY_E")];
+        let o = multi_swipe(&mut r, &pts, (-2480, 0), 12, 0);
+        assert_eq!(gestures_of(&o), vec!["swipe3_left"]);
+        assert!(keys(&o).is_empty(), "no key events: {:?}", keys(&o));
+        assert!(pads(&o).iter().all(|f| f.slots.iter().all(|s| s.is_none())), "no synthetic fingers in gesture mode");
+        // all three on the touchpad: the third finger freezes the first two; they lift after the tap guard
+        let mut r = router_cfg("full", |c| c.gestures = true);
+        let b = boxn(&r, "region.touchpad");
+        let y = b[1] + (b[3] - b[1]) / 3;
+        let pts = [(b[0] + 2000, y), (b[0] + 4000, y), (b[0] + 6000, y)];
+        let mut o = vec![];
+        for (i, p) in pts.iter().enumerate() {
+            o.extend(down(&mut r, 100 + i as u32, *p, i as i64 * 5));
+        }
+        assert!(o.iter().any(|x| matches!(x, Out::Note(n) if n.contains("captured"))), "{:?}", o);
+        let before = pads(&o).len();
+        for s in 1..=12 {
+            for (i, p) in pts.iter().enumerate() {
+                o.extend(mv(&mut r, 100 + i as u32, (p.0, p.1 - 2480 * s / 12), 20 + s as i64 * 10));
+            }
+            o.extend(r.tick(20 + s as i64 * 10));
+        }
+        assert_eq!(gestures_of(&o), vec!["swipe3_up"]);
+        assert_eq!(r.next_deadline(), Some(TAP_GUARD_MS), "the frozen fingers wait for the tap guard");
+        o.extend(r.tick(TAP_GUARD_MS));
+        let f = pads(&o);
+        assert!(f[before..].iter().all(|x| x.slots.iter().filter(|s| s.is_some()).count() <= 3), "no new fingers");
+        assert!(f.last().unwrap().slots.iter().all(|s| s.is_none()), "frozen fingers lifted");
+        // the lift came at or after the tap guard
+        let lift_note = o.iter().position(|x| matches!(x, Out::Note(n) if n.contains("frozen touchpad fingers lifted")));
+        assert!(lift_note.is_some() || f.last().unwrap().slots.iter().all(|s| s.is_none()));
+        for i in 0..3 {
+            up(&mut r, 100 + i, 300);
+        }
+        assert_eq!(r.contacts_down(), 0);
+    }
+
+    #[test]
+    fn m3_gesture_tap_and_no_two_finger_tap_on_the_pad() {
+        let mut r = router_cfg("full", |c| c.gestures = true);
+        // 3 fingers on keys, quick tap: tap3, nothing typed
+        let pts = [at(&r, "key.KEY_A"), at(&r, "key.KEY_S"), at(&r, "key.KEY_D")];
+        let mut o = vec![];
+        for (i, p) in pts.iter().enumerate() {
+            o.extend(down(&mut r, 10 + i as u32, *p, i as i64 * 20));
+        }
+        for i in 0..3 {
+            o.extend(up(&mut r, 10 + i, 150 + i as i64));
+        }
+        assert_eq!(gestures_of(&o), vec!["tap3"]);
+        assert!(keys(&o).is_empty(), "{:?}", keys(&o));
+        // 3 fingers on the pad, quick tap: the two frozen fingers stay down until the guard (no 2-finger tap)
+        let b = boxn(&r, "region.touchpad");
+        let y = b[1] + (b[3] - b[1]) / 3;
+        let mut o = vec![];
+        for i in 0..3 {
+            o.extend(down(&mut r, 20 + i, (b[0] + 2000 + i as i32 * 2000, y), 1000 + i as i64 * 10));
+        }
+        for i in 0..3 {
+            o.extend(up(&mut r, 20 + i, 1100));
+        }
+        assert_eq!(gestures_of(&o), vec!["tap3"]);
+        let f = pads(&o);
+        assert!(f.last().unwrap().slots.iter().any(|s| s.is_some()), "still down at 100 ms: {:?}", f.last());
+        let o = r.tick(1000 + TAP_GUARD_MS);
+        assert!(pads(&o).last().unwrap().slots.iter().all(|s| s.is_none()), "lifted at the guard");
+        // middle click with the fingers where they are
+        let o = r.pad_click(BTN_MIDDLE_T);
+        assert_eq!(pads(&o).iter().flat_map(|f| f.buttons.clone()).collect::<Vec<_>>(), vec![(BTN_MIDDLE_T, true), (BTN_MIDDLE_T, false)]);
+        // gestures off: three keys pressed slowly type
+        let mut r = router("full");
+        let o1 = tap(&mut r, 1, "key.KEY_A", 0);
+        assert!(keys(&o1).contains(&(30, true)));
+    }
+
+    const BTN_MIDDLE_T: u16 = crate::touchpad::BTN_MIDDLE;
+
+    #[test]
+    fn m3_textedit_select_mode_and_joystick() {
+        let mut r = router_cfg("textedit", |c| c.textedit = true);
+        let o = tap(&mut r, 1, "key.KEY_LEFT", 0);
+        assert_eq!(keys(&o), vec![(105, true), (105, false)]);
+        tap(&mut r, 2, "key.select:toggle", 100);
+        assert!(r.select_mode() && r.model().select);
+        let o = tap(&mut r, 3, "key.KEY_LEFT", 200);
+        assert_eq!(keys(&o), vec![(42, true), (105, true), (105, false), (42, false)], "Shift added");
+        let o = tap(&mut r, 4, "key.KEY_LEFTCTRL+KEY_RIGHT", 400);
+        assert_eq!(keys(&o), vec![(29, true), (42, true), (106, true), (106, false), (42, false), (29, false)], "Ctrl+Shift+Right selects a word");
+        tap(&mut r, 5, "key.select:toggle", 600);
+        assert!(!r.select_mode());
+        // joystick: 6 mm right -> one RIGHT at once, repeats on tick, faster when further
+        let c = at(&r, "key.joystick");
+        let ppm_native = 124;
+        let mut o = down(&mut r, 6, c, 1000);
+        o.extend(mv(&mut r, 6, (c.0 + 6 * ppm_native, c.1), 1010));
+        assert_eq!(keys(&o), vec![(106, true), (106, false)]);
+        let d = r.next_deadline().unwrap();
+        assert!(d > 1010 && d <= 1010 + 400, "{}", d);
+        let o = r.tick(d);
+        assert_eq!(keys(&o), vec![(106, true), (106, false)], "repeat");
+        let o = mv(&mut r, 6, (c.0, c.1 - 8 * ppm_native), d + 5);
+        assert_eq!(keys(&o), vec![(103, true), (103, false)], "direction change: UP at once");
+        up(&mut r, 6, d + 20);
+        assert!(r.tick(d + 2000).iter().all(|x| !matches!(x, Out::Key(..))), "nothing after the lift");
+        // module off: the joystick does nothing, the select key does nothing
+        let mut r = router("textedit");
+        let c = at(&r, "key.joystick");
+        let mut o = down(&mut r, 1, c, 0);
+        o.extend(mv(&mut r, 1, (c.0 + 2000, c.1), 10));
+        o.extend(up(&mut r, 1, 20));
+        o.extend(tap(&mut r, 2, "key.select:toggle", 100));
+        assert!(keys(&o).is_empty() && !r.select_mode());
+    }
+
+    #[test]
+    fn m3_laser_timer_target_and_mirror() {
+        let mut r = router_cfg("remote", |c| {
+            c.laser = true;
+            c.target_label = Some("Target: this desktop".into());
+            c.mirror_pct = 30.0;
+        });
+        let b = boxn(&r, "region.touchpad");
+        let (cx, cy) = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2);
+        let o = down(&mut r, 1, (cx, cy), 0);
+        let l: Vec<&Out> = o.iter().filter(|x| matches!(x, Out::Laser(_))).collect();
+        assert!(matches!(l[0], Out::Laser(Some((x, y))) if (x - 0.5).abs() < 0.02 && (y - 0.5).abs() < 0.02), "{:?}", l);
+        assert!(pads(&o).is_empty(), "the laser is not a touchpad");
+        assert!(down(&mut r, 2, (cx + 500, cy), 5).iter().all(|x| !matches!(x, Out::Laser(_))), "one laser finger");
+        let o = mv(&mut r, 1, (b[2], cy), 10);
+        assert!(o.iter().any(|x| matches!(x, Out::Laser(Some((x, _))) if *x > 0.98)));
+        assert!(up(&mut r, 1, 20).contains(&Out::Laser(None)));
+        up(&mut r, 2, 25);
+        assert!(tap(&mut r, 3, "key.timer:toggle", 100).contains(&Out::Timer("toggle".into())));
+        assert!(tap(&mut r, 4, "key.laser:toggle", 200).contains(&Out::SetSetting("features.remote.options.laser".into(), "false".into())));
+        assert!(tap(&mut r, 5, "strip.target", 300).contains(&Out::TargetNext));
+        let m = r.model().mirror.unwrap();
+        let pad = r.model().regions.iter().find(|x| x.id == TOUCHPAD).unwrap().rect;
+        assert!(pad.contains(m.x, m.y) && pad.contains(m.right() - 1.0, m.bottom() - 1.0), "preview inside the pad");
+        assert!(((m.w / pad.w) - 0.3).abs() < 0.02);
+    }
+
+    #[test]
+    fn m3_bands_and_emoji_panel() {
+        let mut r = router_cfg("full", |c| {
+            c.clip_band = true;
+            c.suggest_band = true;
+            c.emoji = true;
+        });
+        let strip = r.model().strip;
+        let area_top = r.model().regions.iter().map(|x| x.rect.y).fold(f32::MAX, f32::min);
+        assert!(area_top >= strip.bottom() + 2.0 * BAND_MM * r.model().px_per_mm - 1.0, "two bands below the strip");
+        r.set_clips(vec!["one".into(), "two".into()]);
+        r.set_suggestions(vec!["the".into(), "that".into()]);
+        assert!(tap(&mut r, 1, "chip.clip.1", 0).contains(&Out::Chip("clip".into(), 1)));
+        assert!(tap(&mut r, 2, "chip.suggest.2", 100).contains(&Out::Chip("suggest".into(), 1)), "chip 0 is the emoji chip");
+        let o = tap(&mut r, 3, "chip.suggest.0", 200);
+        assert!(o.contains(&Out::PanelOpen(true)) && r.emoji_open());
+        let o = tap(&mut r, 4, "emoji.item.1", 300);
+        assert_eq!(o.iter().filter(|x| matches!(x, Out::Emoji(_))).count(), 1);
+        tap(&mut r, 5, "emoji.tab.2", 400);
+        assert_eq!(r.model().emoji.as_ref().unwrap().page, 2);
+        // touches outside the panel do nothing while it is open
+        let o = dn(&mut r, 6, "region.touchpad", 500);
+        assert!(!o.iter().any(|x| matches!(x, Out::Pad(_))));
+        up(&mut r, 6, 520);
+        assert!(tap(&mut r, 7, "panel.close", 600).contains(&Out::PanelOpen(false)));
+        assert!(!r.emoji_open());
+        // no bands: the areas start right below the strip
+        let r2 = router("full");
+        let top2 = r2.model().regions.iter().map(|x| x.rect.y).fold(f32::MAX, f32::min);
+        assert!(top2 < area_top);
     }
 }

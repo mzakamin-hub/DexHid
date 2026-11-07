@@ -8,6 +8,9 @@
 //! On a crash / SIGKILL the kernel ungrabs and removes the touchpad; the guardian sends the key-ups before it
 //! destroys the keyboard.
 
+#[path = "m3.rs"]
+mod m3;
+
 use crate::dbus;
 use crate::desktop::{self, Job, Worker};
 use crate::devices::{destroy_later, VirtualKbd, VirtualMouse, VirtualPad};
@@ -154,6 +157,8 @@ struct D {
     // M2.1
     panels_moved: bool,
     desk: Option<dexhid_core::feedback::DeskLook>,
+    // M3
+    m3: m3::M3State,
 }
 
 pub fn run(opts: Opts) -> i32 {
@@ -246,6 +251,10 @@ pub fn run(opts: Opts) -> i32 {
             verbose: opts.debug,
         },
         xkb_group: std::sync::atomic::AtomicU32::new(cfg.xkb_layout_index),
+        mirror: std::sync::Mutex::new(None),
+        mirror_gen: Default::default(),
+        legend_layout: std::sync::Mutex::new(None),
+        labels: std::sync::Mutex::new(Default::default()),
     });
     let dbus_conn = match dbus::serve(sh.clone()) {
         Ok(c) => {
@@ -395,6 +404,7 @@ pub fn run(opts: Opts) -> i32 {
         guard_respawn_at: None,
         panels_moved: false,
         desk: None,
+        m3: m3::M3State { target: "desktop".into(), ..Default::default() },
         cfg,
         opts,
     };
@@ -412,6 +422,13 @@ pub fn run(opts: Opts) -> i32 {
 }
 
 impl D {
+    /// the router settings: M2 / M2.1 from the config, M3 from the modules (laser depends on the layout)
+    fn router_cfg_full(&self) -> RouterCfg {
+        let mut rc = router_cfg(&self.cfg, self.res);
+        self.m3_router(&mut rc);
+        rc
+    }
+
     fn has_external_output(&self) -> bool {
         self.outputs.iter().any(|n| n != &self.cfg.internal_output && !n.starts_with("DSI") && !n.starts_with("eDP") && !n.starts_with("LVDS"))
     }
@@ -439,6 +456,10 @@ impl D {
         self.monitor_id = Some(id);
         self.handle(Ev::Connected(rem), "plug");
         self.info_next = 0;
+        // M3: the profile of this monitor
+        if self.cfg.features.profiles.enabled {
+            self.m3_select_profile("monitor");
+        }
     }
 
     fn rescan(&mut self, startup: bool) {
@@ -522,7 +543,7 @@ impl D {
                         });
                     }
                 }
-                SheetModule { id: m.id.into(), title: m.title.into(), live: m.implemented, plan: m.plan.into(), rows }
+                SheetModule { id: m.id.into(), title: m.title.into(), live: m.implemented, plan: self.m3_sheet_note(m.id).unwrap_or_else(|| m.plan.into()), rows }
             })
             .collect()
     }
@@ -570,7 +591,8 @@ impl D {
             }
             shown = settings::display(d, Some(&nv));
         }
-        let (c, notes) = config::load_with(&self.paths, &t, self.opts.config.is_some());
+        // M3: the active profile's settings sit on top of the user's
+        let (c, notes) = config::load_with(&self.paths, &self.layered(&t), self.opts.config.is_some());
         if let Some(e) = notes.iter().find(|n| n.starts_with("ERROR")) {
             return Err(e.clone());
         }
@@ -584,7 +606,7 @@ impl D {
 
     /// push the (changed) config into the router, the devices and the desktop
     fn apply_config(&mut self, old: Option<Config>) {
-        let o = self.router.set_cfg(router_cfg(&self.cfg, self.res));
+        let o = self.router.set_cfg(self.router_cfg_full());
         self.apply(o);
         let (items, notes) = quick::resolve(&self.cfg.quick_actions, &desktop::have_program);
         if old.as_ref().map(|o| o.quick_actions != self.cfg.quick_actions).unwrap_or(true) {
@@ -620,6 +642,8 @@ impl D {
         let sheet = self.build_sheet();
         let o = self.router.set_sheet(sheet);
         self.apply(o);
+        // M3 modules (clipboard, words, profiles, mirror, pen, the HID target)
+        self.m3_apply(old.as_ref());
         if let Some(old) = old {
             if old.mode != self.cfg.mode && (self.pad.is_some() || self.mouse.is_some()) {
                 self.pad = None;
@@ -917,6 +941,7 @@ impl D {
                 self.desk = d;
                 self.apply_theme();
             }
+            c @ (Cmd::Clips(..) | Cmd::MirrorSize(..) | Cmd::ActiveApp(_) | Cmd::Profile(..) | Cmd::Act(..) | Cmd::HidStatus(_)) => self.m3_cmd(c),
         }
     }
 
@@ -947,7 +972,7 @@ impl D {
     }
 
     fn arr_path(&self, layout: &str, o: Orientation) -> PathBuf {
-        self.cfg_dir.join(arrangement::file_name(layout, o))
+        self.arr_dir().join(arrangement::file_name(layout, o))
     }
 
     fn load_arr(&self, layout: &str, o: Orientation) -> Option<Arrangement> {
@@ -987,6 +1012,11 @@ impl D {
         println!("LAYOUT t={} name={} title=\"{}\" source={}", mono_ms(), l.name, l.title, l.source);
         let o = self.router.set_layout(l, arr);
         self.apply(o);
+        // M3: the laser depends on the layout (remote)
+        let rc = self.router_cfg_full();
+        let o = self.router.set_cfg(rc);
+        self.apply(o);
+        self.m3_laser_sync();
         if persist {
             self.chosen_layout = name.to_string();
             self.persist.keyboard = Some(name.to_string());
@@ -1003,7 +1033,7 @@ impl D {
         for o in outs {
             match o {
                 Out::Key(c, p) => {
-                    self.kb_key(c, p);
+                    self.out_key(c, p);
                     if self.opts.debug {
                         println!("KEY t={} {}={}", mono_ms(), keycodes::name(c), p as i32);
                     }
@@ -1014,7 +1044,9 @@ impl D {
                     }
                 }
                 Out::Pad(f) => {
-                    if let Some(p) = self.pad.as_mut() {
+                    if self.m3_pad(&f) {
+                        // M3: the HID sink took it
+                    } else if let Some(p) = self.pad.as_mut() {
                         p.apply(&f);
                     } else if let Some((dev, m)) = self.mouse.as_mut() {
                         let mut o = m.feed(&f.slots, mono_ms());
@@ -1088,6 +1120,7 @@ impl D {
                 Out::PanelOpen(b) => println!("PANEL t={} open={}", mono_ms(), b),
                 Out::Static | Out::Dynamic => self.model_dirty = true,
                 Out::Note(s) => println!("NOTE {}", s),
+                o @ (Out::Gesture(_) | Out::Chip(..) | Out::Emoji(_) | Out::Laser(_) | Out::Timer(_) | Out::TargetNext) => self.m3_out(o),
             }
         }
     }
@@ -1138,7 +1171,7 @@ impl D {
             dev.apply(&o);
             dev.release_all();
         }
-        let extra = self.kb_release_all();
+        let extra = self.kb_release_all() + self.m3.sink.as_mut().map(|s| s.release_all()).unwrap_or(0);
         let t_keys = mono_ns();
         let mut slots = None;
         if let Some(t) = &self.touch {
@@ -1170,6 +1203,7 @@ impl D {
         self.kb_destroy();
         self.set_dim(false);
         self.panels_back("release");
+        self.m3_on_release();
     }
 
     /// make the devices / grab / UI match the state machine
@@ -1240,6 +1274,8 @@ impl D {
                             if self.cfg.theme == "desktop" {
                                 self.worker.send(Job::DeskLook);
                             }
+                            // M3: pen to the monitor, mirror preview, profile
+                            self.m3_on_grab();
                         }
                         Err(err) => {
                             println!("ERROR EVIOCGRAB {}: {}", tpath, strerr(err));
@@ -1336,8 +1372,12 @@ impl D {
             "arrangement": if self.router.model().laptop { "laptop" } else { "free" },
             "panels_moved": self.panels_moved,
             "desk_scheme": self.desk.as_ref().map(|d| d.scheme.clone()),
-        })
-        .to_string();
+        });
+        let mut s = s;
+        if let Some(m) = s.as_object_mut() {
+            self.m3_status(m);
+        }
+        let s = s.to_string();
         if s != self.status {
             self.status = s.clone();
             *self.sh.status.lock().unwrap() = s;
@@ -1355,6 +1395,7 @@ impl D {
                 if let Some(r) = desktop::panels_restore(&crate::panels_state(), "exit") {
                     println!("{}", r);
                 }
+                self.m3_exit();
                 println!("EXIT t={} reason={}", mono_ms(), self.reason);
                 // the restore runs in the worker: give it a moment (ExecStopPost=dexhid --restore covers the rest)
                 if self.cfg.dim {
@@ -1365,6 +1406,7 @@ impl D {
             if let Some(code) = self.quit {
                 self.reconcile();
                 self.release();
+                self.m3_exit();
                 println!("EXIT t={} reason={} code={}", mono_ms(), self.reason, code);
                 return code;
             }
@@ -1399,6 +1441,7 @@ impl D {
             if self.machine.effective().grab && !self.grabbed {
                 dl.push(now + 50);
             }
+            self.m3_deadlines(&mut dl);
             let timeout = dl.iter().map(|d| (d - now).clamp(0, 60_000)).min().unwrap_or(60_000) as i32;
             let mut fds = vec![self.wake_rd, self.netlink];
             let touch_fd = if self.grabbed { self.touch.as_ref().map(|t| t.fd).unwrap_or(-1) } else { -1 };
@@ -1407,6 +1450,10 @@ impl D {
             fds.push(self.pen_dev.as_ref().map(|d| d.fd).unwrap_or(-1));
             let kbase = fds.len();
             fds.extend(self.key_devs.iter().map(|k| k.fd));
+            // M3: the HID helper socket + the HID channels
+            let mbase = fds.len();
+            let mfds = self.m3_poll_fds();
+            fds.extend(&mfds);
             let r = poll_in(&fds, timeout.max(0));
             let now = mono_ms();
             if r[0] {
@@ -1468,6 +1515,8 @@ impl D {
                     let o = self.router.set_pen(false);
                     self.apply(o);
                 } else {
+                    // M3: pen on the monitor (grabbed in pad mode)
+                    let _ = self.m3_pen_events(&evs.clone());
                     for ev in evs.clone() {
                         if ev.type_ == EV_KEY && ev.code == BTN_TOOL_PEN {
                             if self.opts.debug {
@@ -1498,6 +1547,12 @@ impl D {
                     }
                 }
             }
+            for (i, fd) in mfds.iter().enumerate() {
+                if r.get(mbase + i).copied().unwrap_or(false) {
+                    self.m3_readable(*fd);
+                }
+            }
+            self.m3_tick(now);
             if self.pending_plug.is_some_and(|p| now >= p) {
                 self.plug_due();
             }
@@ -1523,10 +1578,12 @@ impl D {
                     }
                 }
             }
-            if self.grabbed && self.cfg.status_info && now >= self.info_next {
+            let m3_info = self.m3.timer.running() || self.m3.target != "desktop";
+            if self.grabbed && (self.cfg.status_info || m3_info) && now >= self.info_next {
                 self.info_next = now + 30_000;
                 let ext = self.real_conn.as_ref().map(|c| c.name.clone()).or(if self.sim { Some("simulated display".into()) } else { None });
-                let t = feedback::status_text(std::path::Path::new("/sys/class/power_supply"), ext.as_deref());
+                let base = if self.cfg.status_info { feedback::status_text(std::path::Path::new("/sys/class/power_supply"), ext.as_deref()) } else { String::new() };
+                let t = self.m3_info(base);
                 let o = self.router.set_info(&t);
                 self.apply(o);
             }

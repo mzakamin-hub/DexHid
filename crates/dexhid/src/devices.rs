@@ -165,11 +165,15 @@ pub struct VirtualMouse {
 
 impl VirtualMouse {
     pub fn create() -> Result<VirtualMouse, String> {
+        Self::create_named(MOUSE_NAME)
+    }
+    /// M3: the same device under another name ("dexhid pen pointer")
+    pub fn create_named(name: &str) -> Result<VirtualMouse, String> {
         let u = Uinput::create(&UinputSpec {
             keys: vec![BTN_LEFT, BTN_RIGHT, BTN_MIDDLE],
             rels: vec![REL_X, REL_Y, REL_WHEEL, REL_HWHEEL, REL_WHEEL_HI_RES, REL_HWHEEL_HI_RES],
             props: vec![INPUT_PROP_POINTER],
-            ..UinputSpec::new(MOUSE_NAME)
+            ..UinputSpec::new(name)
         })?;
         Ok(VirtualMouse { u, buttons: Default::default() })
     }

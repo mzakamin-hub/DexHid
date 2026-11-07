@@ -45,6 +45,19 @@ pub enum Cmd {
     ThemeAuto(String),
     /// M2.1 theme "desktop": the KDE look, a log line
     DeskLook(Option<dexhid_core::feedback::DeskLook>, String),
+    // M3
+    /// clipboard history (newest first), backend name
+    Clips(Vec<dexhid_core::extras::ClipData>, String),
+    /// the mirrored monitor's size
+    MirrorSize(u32, u32),
+    /// the focused window's class (KWin script -> D-Bus ActiveApp)
+    ActiveApp(String),
+    /// D-Bus Profile(command) -> reply
+    Profile(String, SyncSender<Result<String, String>>),
+    /// D-Bus Act(command) -> reply (gestures, emoji panel, clipboard, timer, select mode: same as the touch paths)
+    Act(String, SyncSender<Result<String, String>>),
+    /// D-Bus HidStatus -> JSON
+    HidStatus(SyncSender<String>),
 }
 
 /// UI-side configuration (fixed at start)
@@ -77,6 +90,15 @@ pub struct Shared {
     pub ui_cfg: UiCfg,
     /// M2: the active xkb group for the legends (KDE layout tracker), read by the UI thread
     pub xkb_group: std::sync::atomic::AtomicU32,
+    // M3
+    /// the latest mirror preview frame (w, h, 0xffRRGGBB pixels)
+    pub mirror: Mutex<Option<(u32, u32, Vec<u32>)>>,
+    /// bumps with every new mirror frame (the UI redraws the preview)
+    pub mirror_gen: AtomicU64,
+    /// legends from this xkb layout instead of the desktop's keymap (the keyboard language of a USB / BT target)
+    pub legend_layout: Mutex<Option<String>>,
+    /// the legends the UI shows now (code -> levels), for typing text / the word tracker in the daemon
+    pub labels: Mutex<std::collections::HashMap<u16, [String; 4]>>,
 }
 
 impl Shared {

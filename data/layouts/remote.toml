@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
 # DexHid layout (M2): media + presentation remote. Big previous / next slide keys (PgUp / PgDn work in most
 # presentation apps), start (F5) / end (Esc), black screen (B), media and volume keys.
-# Laser-pointer mode and the talk timer are the planned "Media / presentation" module (M3).
+# M3 ("Media / presentation" module): the laser key turns the touchpad into an absolute pointer area, the timer keys
+# start / pause and reset the talk timer shown in the strip.
 name = "remote"
 title = "Media / presentation"
 description = "Slides back / next, start / end, black screen, media and volume"
@@ -21,3 +22,6 @@ keys = [ { key = "F5", label = "Start" }, { key = "LEFTSHIFT+F5", label = "From 
 
 [[part.page.row]]
 keys = [ { key = "PREVIOUSSONG" }, { key = "PLAYPAUSE" }, { key = "NEXTSONG" }, { key = "VOLUMEDOWN" }, { key = "VOLUMEUP" } ]
+
+[[part.page.row]]
+keys = [ { action = "laser:toggle", w = 2, label = "Laser pointer" }, { action = "timer:toggle", label = "Timer start/pause" }, { action = "timer:reset", label = "Timer reset" } ]

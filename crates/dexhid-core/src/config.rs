@@ -119,8 +119,13 @@ pub struct Config {
     pub laptop_pad_width: u32,
     /// KDE: move the Plasma panels to the external monitor while in pad mode (restored on release)
     pub panels_follow: bool,
-    /// planned feature modules (stored and shown in the settings sheet; acted on from M3)
+    /// feature modules (M3: all acted on), each with an on/off flag and options
     pub features: Features,
+    // ---- M3
+    /// where keys and pointer go: "desktop" (this desktop, uinput) | "usb" | "bluetooth" (another device)
+    pub target: String,
+    /// the USB HID helper's socket (root helper: dexhid usb-helper)
+    pub hid_helper_socket: String,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
@@ -174,22 +179,47 @@ pub struct Features {
     pub suggest: Feature,
     pub profiles: Feature,
     pub mirror: Feature,
-    pub wireless: Feature,
+    /// M3: the tablet as a USB keyboard + mouse for another device (configfs gadget through the helper)
+    pub usbhid: Feature,
+    /// M3: the tablet as a Bluetooth keyboard + mouse
+    pub bthid: Feature,
 }
 
 impl Default for Features {
     fn default() -> Features {
-        use toml::Value::{Boolean as B, Integer as I, String as S};
+        use toml::Value::{Boolean as B, Float as F, Integer as I, String as S};
+        let mut g: Vec<(&str, toml::Value)> = vec![];
+        let dm = crate::gestures::default_map();
+        for k in crate::gestures::GESTURES {
+            g.push((k, S(dm[*k].clone())));
+        }
         Features {
-            gestures: feat(&[("three_swipe", S("desktop".into())), ("four_swipe", S("overview".into())), ("three_tap", S("middle-click".into()))]),
-            clipboard: feat(&[("items", I(8))]),
-            textedit: feat(&[("joystick", B(false))]),
-            remote: feat(&[("laser", B(false)), ("timer_min", I(0))]),
-            pen: feat(&[("mode", S("pointer".into()))]),
-            suggest: feat(&[]),
+            gestures: feat(&g),
+            clipboard: feat(&[("items", I(8)), ("images", B(false))]),
+            textedit: feat(&[("joystick", B(true)), ("joystick_dead_mm", F(3.0))]),
+            remote: feat(&[("laser", B(false)), ("laser_highlight", B(true)), ("timer_min", I(0))]),
+            pen: feat(&[("mode", S("pointer".into())), ("speed", F(1.0))]),
+            suggest: feat(&[("words", B(true)), ("count", I(3)), ("emoji_panel", B(true))]),
             profiles: feat(&[("per_app", B(false))]),
-            mirror: feat(&[("fps", I(5))]),
-            wireless: feat(&[]),
+            mirror: feat(&[("fps", I(2)), ("size_pct", I(35))]),
+            usbhid: feat(&[("layout", S("desktop".into())), ("abs_pointer", B(false)), ("stop_other", B(false)), ("udc", S("auto".into()))]),
+            bthid: feat(&[("layout", S("desktop".into())), ("abs_pointer", B(false)), ("discoverable_s", I(120))]),
+        }
+    }
+}
+
+impl Feature {
+    pub fn b(&self, k: &str, d: bool) -> bool {
+        self.options.get(k).and_then(|v| v.as_bool()).unwrap_or(d)
+    }
+    pub fn s(&self, k: &str, d: &str) -> String {
+        self.options.get(k).and_then(|v| v.as_str()).unwrap_or(d).to_string()
+    }
+    pub fn n(&self, k: &str, d: f64) -> f64 {
+        match self.options.get(k) {
+            Some(toml::Value::Integer(i)) => *i as f64,
+            Some(toml::Value::Float(f)) => *f,
+            _ => d,
         }
     }
 }
@@ -257,6 +287,8 @@ impl Default for Config {
             laptop_pad_width: 100,
             panels_follow: true,
             features: Features::default(),
+            target: "desktop".into(),
+            hid_helper_socket: "/run/dexhid/hid.sock".into(),
         }
     }
 }
@@ -301,11 +333,25 @@ pub fn save_settings(p: &Path, t: &toml::Table) -> Result<(), String> {
 
 /// settings of removed features: still accepted in old files, dropped before the strict parse
 /// (`wallpaper`: the wallpaper behind the keys, removed by the owner's decision of 7 Nov 2026)
-pub const RETIRED_KEYS: &[&str] = &["wallpaper"];
+/// (`features.wireless`: the M2 design-only module, replaced by `features.usbhid` / `features.bthid` in M3)
+pub const RETIRED_KEYS: &[&str] = &["wallpaper", "features.wireless"];
 
-/// remove retired keys from a table; one note per key found
+/// remove retired keys (dotted paths) from a table; one note per key found
 pub fn strip_retired(t: &mut toml::Table) -> Vec<String> {
-    RETIRED_KEYS.iter().filter(|k| t.remove(**k).is_some()).map(|k| format!("NOTE retired setting `{}` ignored (feature removed)", k)).collect()
+    let mut notes = vec![];
+    for k in RETIRED_KEYS {
+        let parts: Vec<&str> = k.split('.').collect();
+        let mut cur: Option<&mut toml::Table> = Some(t);
+        for p in &parts[..parts.len() - 1] {
+            cur = cur.and_then(|c| c.get_mut(*p)).and_then(|v| v.as_table_mut());
+        }
+        if let Some(c) = cur {
+            if c.remove(parts[parts.len() - 1]).is_some() {
+                notes.push(format!("NOTE retired setting `{}` ignored (feature removed)", k));
+            }
+        }
+    }
+    notes
 }
 
 /// merge the config files plus the settings overrides into a Config (the settings come before `--config`, which is
@@ -401,6 +447,10 @@ pub struct Persist {
     pub autostart: Option<String>,
     /// EDID hash (hex) -> "pad" | "display"; stays local, never logged in full
     pub monitors: BTreeMap<String, String>,
+    /// M3: keyboard language per HID target ("usb", "bt:<hash of the host address>") -> xkb layout
+    pub targets: BTreeMap<String, String>,
+    /// M3: a profile chosen by the user (None = automatic selection)
+    pub profile: Option<String>,
 }
 
 impl Persist {

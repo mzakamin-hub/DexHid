@@ -120,6 +120,10 @@ impl<'a> Canvas<'a> {
 
 pub struct Fonts {
     font: Option<FontVec>,
+    /// M3: a fallback font for emoji / symbols with outline glyphs (a colour-only bitmap / COLR font gives no
+    /// outlines: such emoji show as their code point)
+    emoji: Option<FontVec>,
+    pub emoji_path: String,
     pub path: String,
     cache: HashMap<(char, u32), Option<(Vec<u8>, i32, i32, i32, i32)>>,
 }
@@ -150,21 +154,71 @@ impl Fonts {
         for p in cands {
             if let Ok(b) = std::fs::read(&p) {
                 if let Ok(f) = FontVec::try_from_vec(b) {
-                    return Fonts { font: Some(f), path: p, cache: HashMap::new() };
+                    let (emoji, emoji_path) = Self::emoji_font();
+                    return Fonts { font: Some(f), emoji, emoji_path, path: p, cache: HashMap::new() };
                 }
             }
         }
-        Fonts { font: None, path: "none".into(), cache: HashMap::new() }
+        Fonts { font: None, emoji: None, emoji_path: "none".into(), path: "none".into(), cache: HashMap::new() }
+    }
+
+    /// M3: an emoji font with outlines (Noto Emoji monochrome, Symbola, ...)
+    fn emoji_font() -> (Option<FontVec>, String) {
+        let mut cands: Vec<String> = vec![];
+        if let Ok(p) = std::env::var("DEXHID_EMOJI_FONT") {
+            cands.push(p);
+        }
+        for pat in ["Noto Emoji", "emoji", "Symbola"] {
+            if let Ok(o) = std::process::Command::new("fc-match").args(["-f", "%{file}", pat]).output() {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !s.is_empty() && !cands.contains(&s) {
+                    cands.push(s);
+                }
+            }
+        }
+        cands.extend(
+            ["/usr/share/fonts/google-noto-emoji/NotoEmoji-Regular.ttf", "/usr/share/fonts/google-noto-emoji-fonts/NotoEmoji-Regular.ttf", "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf", "/usr/share/fonts/gdouros-symbola/Symbola.ttf"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        for p in cands {
+            if let Ok(b) = std::fs::read(&p) {
+                if let Ok(f) = FontVec::try_from_vec(b) {
+                    // outline glyphs needed (bitmap / COLR emoji fonts draw nothing here)
+                    let g = f.glyph_id('\u{1f600}');
+                    if g.0 != 0 && f.outline(g).is_some() {
+                        return (Some(f), p);
+                    }
+                }
+            }
+        }
+        (None, "none".into())
+    }
+
+    fn main_has(&self, c: char) -> bool {
+        self.font.as_ref().is_some_and(|f| f.glyph_id(c).0 != 0)
     }
 
     fn has(&self, c: char) -> bool {
-        self.font.as_ref().is_some_and(|f| f.glyph_id(c).0 != 0)
+        self.main_has(c) || self.emoji.as_ref().is_some_and(|f| f.glyph_id(c).0 != 0)
+    }
+
+    /// the font that draws `c`
+    fn font_for(&self, c: char) -> Option<&FontVec> {
+        if !self.main_has(c) {
+            if let Some(e) = self.emoji.as_ref().filter(|f| f.glyph_id(c).0 != 0) {
+                return Some(e);
+            }
+        }
+        self.font.as_ref()
     }
 
     /// replace symbols the font cannot draw
     pub fn printable(&self, s: &str) -> String {
+        // M3: variation selectors / joiners are invisible
+        let s: String = s.chars().filter(|c| !matches!(*c, '\u{fe0f}' | '\u{fe0e}' | '\u{200d}')).collect();
         if s.chars().all(|c| self.has(c) || c == ' ') {
-            return s.to_string();
+            return s;
         }
         s.chars()
             .map(|c| {
@@ -179,6 +233,8 @@ impl Fonts {
                         '\u{2192}' => ">".into(),
                         '\u{2191}' => "^".into(),
                         '\u{2193}' => "v".into(),
+                        // M3: an emoji without a drawable glyph shows its code point
+                        c if (c as u32) >= 0x2300 => format!("U+{:X}", c as u32),
                         _ => "?".into(),
                     }
                 }
@@ -188,16 +244,22 @@ impl Fonts {
 
     /// width of `s` at `size` buffer px
     pub fn width(&self, s: &str, size: f32) -> f32 {
-        let Some(f) = &self.font else { return 0.0 };
-        let sf = f.as_scaled(PxScale::from(size));
-        s.chars().map(|c| sf.h_advance(f.glyph_id(c))).sum()
+        if self.font.is_none() {
+            return 0.0;
+        }
+        s.chars()
+            .map(|c| {
+                let f = self.font_for(c).unwrap();
+                f.as_scaled(PxScale::from(size)).h_advance(f.glyph_id(c))
+            })
+            .sum()
     }
 
     fn glyph(&mut self, c: char, size: u32) -> Option<(Vec<u8>, i32, i32, i32, i32)> {
         if let Some(g) = self.cache.get(&(c, size)) {
             return g.clone();
         }
-        let f = self.font.as_ref()?;
+        let f = self.font_for(c)?;
         let sf = f.as_scaled(PxScale::from(size as f32));
         let gl = sf.scaled_glyph(c);
         let r = match f.outline_glyph(gl) {
@@ -265,7 +327,7 @@ impl Fonts {
         let ca = color >> 24;
         for ch in s.chars() {
             let adv = {
-                let f = self.font.as_ref().unwrap();
+                let f = self.font_for(ch).unwrap();
                 f.as_scaled(PxScale::from(size as f32)).h_advance(f.glyph_id(ch))
             };
             if let Some((cov, w, h, gx, gy)) = self.glyph(ch, size) {

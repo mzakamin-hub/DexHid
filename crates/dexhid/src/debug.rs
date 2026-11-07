@@ -34,11 +34,107 @@ pub fn run(a: &Args) -> i32 {
         Some("replay") => replay(a),
         Some("volsim") => volsim(a),
         Some("render") => crate::ui::render_debug(a),
+        // M3 test tools
+        Some("hid-desc") => hid_desc(a),
+        Some("hid-client") => hid_client(a),
+        Some("gadget-remove") => {
+            let root = std::path::PathBuf::from(a.val("--configfs").unwrap_or_else(|| "/sys/kernel/config/usb_gadget".into()));
+            match dexhid_core::gadget::remove(&root, root.starts_with("/sys/kernel/config")) {
+                Ok(l) => {
+                    println!("GADGET-REMOVE steps={} {}", l.len(), if l.is_empty() { "(nothing there)" } else { "" });
+                    0
+                }
+                Err(e) => {
+                    println!("GADGET-REMOVE failed: {}", e);
+                    1
+                }
+            }
+        }
         _ => {
             eprintln!("usage: dexhid debug list | grabtest --dev P | replay --fifo F [--clone P] [--name N] [--secs S] | volsim --fifo F [--keys K1+K2] [--secs S]");
             2
         }
     }
+}
+
+/// `debug hid-desc kbd|mouse|extra|extra-abs|bt|bt-abs|sdp`: a report descriptor as hex (runner: compare with configfs)
+fn hid_desc(a: &Args) -> i32 {
+    use dexhid_core::hid;
+    let w = a.0.get(1).map(|s| s.as_str()).unwrap_or("kbd");
+    let d = match w {
+        "kbd" => hid::usb_functions(false)[0].desc.clone(),
+        "mouse" => hid::usb_functions(false)[1].desc.clone(),
+        "extra" => hid::usb_functions(false)[2].desc.clone(),
+        "extra-abs" => hid::usb_functions(true)[2].desc.clone(),
+        "bt" => hid::bt_descriptor(false),
+        "bt-abs" => hid::bt_descriptor(true),
+        "sdp" => {
+            print!("{}", hid::sdp_record(&hid::bt_descriptor(false)));
+            return 0;
+        }
+        _ => {
+            println!("FAIL hid-desc: kbd | mouse | extra | extra-abs | bt | bt-abs | sdp");
+            return 2;
+        }
+    };
+    println!("{}", hid::hex(&d));
+    0
+}
+
+/// `debug hid-client --socket S [--hold MS] [--write] CMD..`: a test client of the HID helper. Sends each command,
+/// prints the replies; with --write writes one keyboard report (all keys up) to the first fd it got and prints the
+/// result (no host: ESHUTDOWN); then holds the connection MS ms (the runner kills it to test the crash teardown).
+fn hid_client(a: &Args) -> i32 {
+    let sock = a.val("--socket").unwrap_or_else(|| "/run/dexhid/hid.sock".into());
+    let hold = a.val("--hold").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let s = match crate::ipc::connect(&sock) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("FAIL {}", e);
+            return 1;
+        }
+    };
+    let mut got: Vec<i32> = vec![];
+    let skip = ["--socket", "--hold"];
+    let mut i = 1;
+    while i < a.0.len() {
+        let w = &a.0[i];
+        if skip.contains(&w.as_str()) {
+            i += 2;
+            continue;
+        }
+        if w == "--write" {
+            i += 1;
+            continue;
+        }
+        let _ = crate::ipc::send(s, w, &[]);
+        match crate::ipc::recv(s) {
+            Some((r, fds)) => {
+                println!("REPLY {} fds={}", r, fds.len());
+                got.extend(fds);
+            }
+            None => {
+                println!("REPLY <closed>");
+                break;
+            }
+        }
+        i += 1;
+    }
+    if a.flag("--write") {
+        if let Some(&fd) = got.first() {
+            let r = crate::ipc::write_fd(fd, &[0u8; 8]);
+            println!("WRITE kbd result={}", match r {
+                Ok(n) => format!("ok {} bytes", n),
+                Err(e) if e == libc::ESHUTDOWN => "ESHUTDOWN (no host configured the gadget)".into(),
+                Err(e) => strerr(e),
+            });
+        }
+    }
+    if hold > 0 {
+        println!("HOLD {} ms pid={}", hold, std::process::id());
+        sleep_ms(hold);
+    }
+    0
 }
 
 fn list() -> i32 {
@@ -313,7 +409,26 @@ fn volsim(a: &Args) -> i32 {
     // M2: --name / --bus bluetooth make it a stand-in for a pen (keys 320 = BTN_TOOL_PEN) or a BT keyboard
     let name = a.val("--name").unwrap_or_else(|| "dexhid-volsim".into());
     let bus = if a.val("--bus").as_deref() == Some("bluetooth") { BUS_BLUETOOTH } else { 0 };
-    let u = match Uinput::create(&UinputSpec { keys: keys.clone(), bus, ..UinputSpec::new(&name) }) {
+    // M3: --pen adds pen axes (X / Y / pressure / tilt, ranges cloned from --clone P when given) + BTN_TOUCH /
+    // BTN_STYLUS; command `abs X Y [PRESSURE]`
+    let mut keys = keys;
+    let mut abs = vec![];
+    if a.flag("--pen") {
+        let src = a.val("--clone").and_then(|p| Dev::open(&p, false).ok());
+        let g = |code: u16, d: AbsInfo| src.as_ref().and_then(|s| s.absinfo(code)).unwrap_or(d);
+        abs.push((ABS_X, g(ABS_X, ai(0, 33919, 124))));
+        abs.push((0x01, g(0x01, ai(0, 23999, 124))));
+        abs.push((0x18, g(0x18, ai(0, 4095, 0))));
+        abs.push((0x1a, g(0x1a, ai(-90, 90, 0))));
+        abs.push((0x1b, g(0x1b, ai(-90, 90, 0))));
+        for k in [BTN_TOOL_PEN, BTN_TOUCH, 0x14b] {
+            if !keys.contains(&k) {
+                keys.push(k);
+            }
+        }
+        keys.sort_unstable();
+    }
+    let u = match Uinput::create(&UinputSpec { keys: keys.clone(), bus, abs, ..UinputSpec::new(&name) }) {
         Ok(u) => u,
         Err(e) => {
             println!("FAIL volsim: {}", e);
@@ -329,6 +444,19 @@ fn volsim(a: &Args) -> i32 {
         }
     };
     let why = command_loop(fd, a.f64("--secs", 170.0).min(600.0), |w| {
+        if w[0] == "abs" {
+            let n = |i: usize| w.get(i).and_then(|v| v.parse::<i32>().ok());
+            if let (Some(x), Some(y)) = (n(1), n(2)) {
+                u.emit(EV_ABS, ABS_X, x);
+                u.emit(EV_ABS, 0x01, y);
+                if let Some(p) = n(3) {
+                    u.emit(EV_ABS, 0x18, p);
+                }
+                u.syn();
+                println!("SIM t={} abs {} {}", mono_ms(), x, y);
+            }
+            return true;
+        }
         let v = match w[0] {
             "down" => 1,
             "up" => 0,

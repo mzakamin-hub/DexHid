@@ -428,6 +428,17 @@ impl PadMapper {
         Some(PadFrame { slots: self.pos, buttons: std::mem::take(&mut self.buttons) })
     }
 
+    /// M3: a button click on the touchpad (gesture actions: middle click) with the fingers where they are
+    pub fn click(&mut self, btn: u16) -> Vec<PadFrame> {
+        let mut v = vec![];
+        if let Some(f) = self.take_frame() {
+            v.push(f);
+        }
+        v.push(PadFrame { slots: self.pos, buttons: vec![(btn, true)] });
+        v.push(PadFrame { slots: self.pos, buttons: vec![(btn, false)] });
+        v
+    }
+
     /// lift every finger and button (before an ungrab / destroy / layout change / swipe)
     pub fn release_all(&mut self) -> Option<PadFrame> {
         self.pending = None;

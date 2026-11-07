@@ -48,18 +48,25 @@ pub const MODULES: &[Module] = &[
     Module { id: "look", title: "Display + theme", implemented: true, plan: "" },
     Module { id: "palm", title: "Palm + rest zones", implemented: true, plan: "" },
     Module { id: "feedback", title: "Sound + haptics", implemented: true, plan: "" },
-    Module { id: "gestures", title: "Pad gestures", implemented: false, plan: "M3, 2-3 d" },
-    Module { id: "clipboard", title: "Clipboard history", implemented: false, plan: "M3, 2 d" },
-    Module { id: "textedit", title: "Text editing mode", implemented: false, plan: "M3, 1-2 d (layout part done)" },
-    Module { id: "remote", title: "Media / presentation", implemented: false, plan: "M3, 1-2 d (layout part done)" },
-    Module { id: "pen", title: "Pen on the monitor", implemented: false, plan: "M3, 3-4 d" },
-    Module { id: "suggest", title: "Suggestions + emoji", implemented: false, plan: "M3, 3-5 d (emoji action done)" },
-    Module { id: "profiles", title: "Profiles", implemented: false, plan: "M3, 2-3 d" },
-    Module { id: "mirror", title: "Mirror preview", implemented: false, plan: "M3, 3-4 d" },
-    Module { id: "wireless", title: "Wireless mode", implemented: false, plan: "design only (M4+)" },
+    Module { id: "gestures", title: "Gesture shortcuts", implemented: true, plan: "" },
+    Module { id: "clipboard", title: "Clipboard history", implemented: true, plan: "" },
+    Module { id: "textedit", title: "Text editing mode", implemented: true, plan: "" },
+    Module { id: "remote", title: "Media / presentation", implemented: true, plan: "" },
+    Module { id: "pen", title: "Pen on the monitor", implemented: true, plan: "" },
+    Module { id: "suggest", title: "Suggestions + emoji", implemented: true, plan: "" },
+    Module { id: "profiles", title: "Profiles", implemented: true, plan: "" },
+    Module { id: "mirror", title: "Mirror preview", implemented: true, plan: "" },
+    Module { id: "usbhid", title: "USB keyboard / mouse", implemented: true, plan: "" },
+    Module { id: "bthid", title: "Bluetooth keyboard / mouse", implemented: true, plan: "" },
 ];
 
 const ON_OFF_ASK: &[&str] = &["ask", "on", "off"];
+/// keyboard languages for another device (xkb layout or layout(variant)); "desktop" = this desktop's current one
+pub const TARGET_LAYOUTS: &[&str] = &[
+    "desktop", "us", "us(intl)", "us(dvorak)", "us(colemak)", "gb", "de", "de(nodeadkeys)", "ch", "fr", "fr(oss)", "be", "es", "it", "pt", "br", "nl", "se",
+    "no", "dk", "fi", "pl", "cz", "hu", "ru", "ua", "tr", "jp",
+];
+const G: &[&str] = crate::gestures::ACTIONS;
 
 pub const DEFS: &[Def] = &[
     // general
@@ -109,26 +116,49 @@ pub const DEFS: &[Def] = &[
     // feedback
     Def { key: "sound_feedback", module: "feedback", title: "Key click sound", kind: Kind::Bool },
     Def { key: "haptic_feedback", module: "feedback", title: "Vibrate on key press", kind: Kind::Bool },
-    // planned modules (stored now, acted on in M3)
-    Def { key: "features.gestures.enabled", module: "gestures", title: "Gesture shortcuts", kind: Kind::Bool },
-    Def { key: "features.gestures.options.three_swipe", module: "gestures", title: "3-finger swipe", kind: Kind::Choice(&["desktop", "back-forward", "overview", "off"]) },
-    Def { key: "features.gestures.options.four_swipe", module: "gestures", title: "4-finger swipe", kind: Kind::Choice(&["overview", "desktop", "off"]) },
-    Def { key: "features.gestures.options.three_tap", module: "gestures", title: "3-finger tap", kind: Kind::Choice(&["middle-click", "off"]) },
+    // M3 modules
+    Def { key: "target", module: "general", title: "Keys + pointer go to", kind: Kind::Choice(&["desktop", "usb", "bluetooth"]) },
+    Def { key: "features.gestures.enabled", module: "gestures", title: "Gesture shortcuts (3 / 4 fingers)", kind: Kind::Bool },
+    Def { key: "features.gestures.options.swipe3_left", module: "gestures", title: "3 fingers left", kind: Kind::Choice(G) },
+    Def { key: "features.gestures.options.swipe3_right", module: "gestures", title: "3 fingers right", kind: Kind::Choice(G) },
+    Def { key: "features.gestures.options.swipe3_up", module: "gestures", title: "3 fingers up", kind: Kind::Choice(G) },
+    Def { key: "features.gestures.options.swipe3_down", module: "gestures", title: "3 fingers down", kind: Kind::Choice(G) },
+    Def { key: "features.gestures.options.swipe4_left", module: "gestures", title: "4 fingers left", kind: Kind::Choice(G) },
+    Def { key: "features.gestures.options.swipe4_right", module: "gestures", title: "4 fingers right", kind: Kind::Choice(G) },
+    Def { key: "features.gestures.options.swipe4_up", module: "gestures", title: "4 fingers up", kind: Kind::Choice(G) },
+    Def { key: "features.gestures.options.swipe4_down", module: "gestures", title: "4 fingers down", kind: Kind::Choice(G) },
+    Def { key: "features.gestures.options.tap3", module: "gestures", title: "3-finger tap", kind: Kind::Choice(G) },
+    Def { key: "features.gestures.options.tap4", module: "gestures", title: "4-finger tap", kind: Kind::Choice(G) },
     Def { key: "features.clipboard.enabled", module: "clipboard", title: "Clipboard history strip", kind: Kind::Bool },
     Def { key: "features.clipboard.options.items", module: "clipboard", title: "Items", kind: Kind::Num { min: 5.0, max: 10.0, step: 1.0, int: true } },
-    Def { key: "features.textedit.enabled", module: "textedit", title: "Text editing mode", kind: Kind::Bool },
+    Def { key: "features.clipboard.options.images", module: "clipboard", title: "Keep images too", kind: Kind::Bool },
+    Def { key: "features.textedit.enabled", module: "textedit", title: "Text editing mode (select key, joystick)", kind: Kind::Bool },
     Def { key: "features.textedit.options.joystick", module: "textedit", title: "Cursor joystick", kind: Kind::Bool },
-    Def { key: "features.remote.enabled", module: "remote", title: "Presentation remote", kind: Kind::Bool },
-    Def { key: "features.remote.options.laser", module: "remote", title: "Laser pointer mode", kind: Kind::Bool },
-    Def { key: "features.remote.options.timer_min", module: "remote", title: "Timer (min)", kind: Kind::Num { min: 0.0, max: 120.0, step: 5.0, int: true } },
+    Def { key: "features.textedit.options.joystick_dead_mm", module: "textedit", title: "Joystick dead zone (mm)", kind: Kind::Num { min: 1.0, max: 8.0, step: 0.5, int: false } },
+    Def { key: "features.remote.enabled", module: "remote", title: "Presentation remote (laser, timer)", kind: Kind::Bool },
+    Def { key: "features.remote.options.laser", module: "remote", title: "Laser pointer: pad = absolute pointer", kind: Kind::Bool },
+    Def { key: "features.remote.options.laser_highlight", module: "remote", title: "Laser: highlight the pointer (KWin)", kind: Kind::Bool },
+    Def { key: "features.remote.options.timer_min", module: "remote", title: "Talk timer (min, 0 = stopwatch)", kind: Kind::Num { min: 0.0, max: 120.0, step: 5.0, int: true } },
     Def { key: "features.pen.enabled", module: "pen", title: "Pen on the external monitor", kind: Kind::Bool },
     Def { key: "features.pen.options.mode", module: "pen", title: "Pen mode", kind: Kind::Choice(&["pointer", "tablet"]) },
-    Def { key: "features.suggest.enabled", module: "suggest", title: "Word suggestions (input method)", kind: Kind::Bool },
-    Def { key: "features.profiles.enabled", module: "profiles", title: "Profiles", kind: Kind::Bool },
-    Def { key: "features.profiles.options.per_app", module: "profiles", title: "Switch per focused app", kind: Kind::Bool },
-    Def { key: "features.mirror.enabled", module: "mirror", title: "Mirror preview", kind: Kind::Bool },
-    Def { key: "features.mirror.options.fps", module: "mirror", title: "Preview fps", kind: Kind::Num { min: 1.0, max: 15.0, step: 1.0, int: true } },
-    Def { key: "features.wireless.enabled", module: "wireless", title: "Wireless mode (design only)", kind: Kind::Bool },
+    Def { key: "features.pen.options.speed", module: "pen", title: "Pointer mode speed", kind: Kind::Num { min: 0.3, max: 3.0, step: 0.1, int: false } },
+    Def { key: "features.suggest.enabled", module: "suggest", title: "Keyboard extras (suggestions, emoji)", kind: Kind::Bool },
+    Def { key: "features.suggest.options.words", module: "suggest", title: "Word suggestions (local word list)", kind: Kind::Bool },
+    Def { key: "features.suggest.options.count", module: "suggest", title: "Suggestions shown", kind: Kind::Num { min: 2.0, max: 5.0, step: 1.0, int: true } },
+    Def { key: "features.suggest.options.emoji_panel", module: "suggest", title: "Emoji panel", kind: Kind::Bool },
+    Def { key: "features.profiles.enabled", module: "profiles", title: "Profiles (per monitor)", kind: Kind::Bool },
+    Def { key: "features.profiles.options.per_app", module: "profiles", title: "Switch per focused app (KWin)", kind: Kind::Bool },
+    Def { key: "features.mirror.enabled", module: "mirror", title: "Mirror preview of the monitor", kind: Kind::Bool },
+    Def { key: "features.mirror.options.fps", module: "mirror", title: "Preview fps", kind: Kind::Num { min: 1.0, max: 10.0, step: 1.0, int: true } },
+    Def { key: "features.mirror.options.size_pct", module: "mirror", title: "Preview size (% of the pad)", kind: Kind::Num { min: 20.0, max: 60.0, step: 5.0, int: true } },
+    Def { key: "features.usbhid.enabled", module: "usbhid", title: "USB keyboard / mouse for another device", kind: Kind::Bool },
+    Def { key: "features.usbhid.options.layout", module: "usbhid", title: "Keyboard language of that device", kind: Kind::Choice(TARGET_LAYOUTS) },
+    Def { key: "features.usbhid.options.abs_pointer", module: "usbhid", title: "Absolute pointer (laser / pen)", kind: Kind::Bool },
+    Def { key: "features.usbhid.options.stop_other", module: "usbhid", title: "Stop another gadget that holds the port", kind: Kind::Bool },
+    Def { key: "features.bthid.enabled", module: "bthid", title: "Bluetooth keyboard / mouse", kind: Kind::Bool },
+    Def { key: "features.bthid.options.layout", module: "bthid", title: "Keyboard language of that device", kind: Kind::Choice(TARGET_LAYOUTS) },
+    Def { key: "features.bthid.options.abs_pointer", module: "bthid", title: "Absolute pointer (laser / pen)", kind: Kind::Bool },
+    Def { key: "features.bthid.options.discoverable_s", module: "bthid", title: "Visible for pairing (s)", kind: Kind::Num { min: 30.0, max: 600.0, step: 30.0, int: true } },
 ];
 
 pub fn def(key: &str) -> Option<&'static Def> {
@@ -171,7 +201,8 @@ pub fn parse(d: &Def, s: &str) -> Result<Value, String> {
             _ => Err(format!("{}: expected true / false", d.key)),
         },
         Kind::Choice(c) => {
-            if c.contains(&s) {
+            // M3: a gesture may run any quick action, custom ones included ("quick:<id>", checked by the daemon)
+            if c.contains(&s) || (d.key.starts_with("features.gestures.options.") && s.strip_prefix("quick:").is_some_and(|i| !i.is_empty())) {
                 Ok(Value::String(s.into()))
             } else {
                 Err(format!("{}: one of {:?}", d.key, c))
@@ -309,6 +340,12 @@ mod tests {
         assert_eq!(get(&Value::Table(t), "features.gestures.options.three_swipe").and_then(|v| v.as_str()), Some("off"));
         let r = rows("feedback", &cfgv(), &["haptic_feedback".to_string()].into_iter().collect());
         assert_eq!(r.len(), 1, "hidden setting (no vibration device) is not shown");
-        assert!(rows("gestures", &cfgv(), &HashSet::new()).iter().all(|r| !r.live));
+        assert!(rows("gestures", &cfgv(), &HashSet::new()).iter().all(|r| r.live), "M3: every module is live");
+        assert!(MODULES.iter().all(|m| m.implemented));
+        let g = def("features.gestures.options.tap3").unwrap();
+        assert_eq!(parse(g, "quick:term").unwrap(), Value::String("quick:term".into()));
+        assert!(parse(g, "bogus").is_err());
+        assert!(parse(def("features.usbhid.options.layout").unwrap(), "de(nodeadkeys)").is_ok());
+        assert!(parse(def("target").unwrap(), "usb").is_ok());
     }
 }

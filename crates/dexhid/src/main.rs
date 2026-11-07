@@ -9,11 +9,19 @@
 //!   dexhid debug list | grabtest | replay | volsim                  (test tools, see debug.rs)
 //!   dexhid set KEY [VALUE] | settings | quick ID                    (M2: settings registry, quick actions)
 //!   dexhid guardian --fd N [--hb-ms MS]                             (the key guardian; started by the daemon)
+//!   dexhid profile list|save NAME [monitor] [app=CLASS]|use NAME|auto|delete NAME   (M3 profiles)
+//!   dexhid act CMD.. | hid-status                                   (M3 feature actions, USB / BT HID state)
+//!   dexhid hid-helper [--socket P] [--allow-uid N]                  (M3 root helper of the USB / BT HID modes)
 //!   dexhid --restore                                                (ExecStopPost: restores a dimmed panel)
 //!   dexhid version
 
+mod clipboard;
 mod daemon;
 mod dbus;
+mod hidhelper;
+mod hidsink;
+mod ipc;
+mod mirror;
 mod debug;
 mod desktop;
 mod devices;
@@ -42,6 +50,8 @@ fn usage() -> i32 {
         "usage: dexhid daemon [--config FILE] [--touch-dev /dev/input/eventN] [--debug [--chord-test-dev P] [--simulate-connect]]\n       \
          dexhid toggle | release | resume | status | layout <name> | debug-connect | debug-disconnect\n       \
          dexhid set KEY [VALUE] | settings | quick ID\n       \
+         dexhid profile list|save NAME [monitor] [app=CLASS]|use NAME|auto|delete NAME | act CMD.. | hid-status\n       \
+         dexhid hid-helper [--socket P] [--allow-uid N] [--configfs DIR]\n       \
          dexhid debug list | grabtest --dev P | replay --fifo F ... | volsim --fifo F ...\n       \
          dexhid --restore | version"
     );
@@ -89,6 +99,11 @@ fn main() {
             Some(id) => client("RunQuick", Some(id)),
             None => usage(),
         },
+        // M3
+        Some("profile") if argv.len() >= 2 => client("Profile", Some(&argv[1..].join(" "))),
+        Some("act") if argv.len() >= 2 => client("Act", Some(&argv[1..].join(" "))),
+        Some("hid-status") => client("HidStatus", None),
+        Some("hid-helper") => hidhelper::run(&debug::Args(argv[1..].to_vec())),
         Some("guardian") => guardian::run(a.val("--fd").and_then(|v| v.parse().ok()).unwrap_or(3), a.val("--hb-ms").and_then(|v| v.parse().ok()).unwrap_or(3000)),
         Some("debug-connect") => client("DebugConnector", Some("connect")),
         Some("debug-disconnect") => client("DebugConnector", Some("disconnect")),
@@ -103,7 +118,7 @@ fn main() {
             0
         }
         Some("version") | Some("--version") => {
-            println!("dexhid {} (M2.1, GPL-3.0-or-later PROVISIONAL)", env!("CARGO_PKG_VERSION"));
+            println!("dexhid {} (M3, GPL-3.0-or-later PROVISIONAL)", env!("CARGO_PKG_VERSION"));
             0
         }
         _ => usage(),

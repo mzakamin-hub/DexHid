@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# DexHid M3: the socket of the root helper of the USB / Bluetooth keyboard + mouse modes. The helper checks the
+# peer (root or the active seat0 user) itself, so the socket is world-connectable. Not enabled by default.
+[Unit]
+Description=DexHid HID helper socket (USB / Bluetooth keyboard + mouse mode)
+
+[Socket]
+ListenSequentialPacket=/run/dexhid/hid.sock
+SocketMode=0666
+DirectoryMode=0755
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

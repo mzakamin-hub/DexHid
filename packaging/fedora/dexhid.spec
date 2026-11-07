@@ -41,6 +41,8 @@ and CLI control it.
 %install
 install -Dpm 0755 target/rpm/dexhid %{buildroot}%{_bindir}/dexhid
 install -Dpm 0644 data/dexhid.service %{buildroot}%{_userunitdir}/dexhid.service
+install -Dpm 0644 data/dexhid-hid.socket %{buildroot}%{_unitdir}/dexhid-hid.socket
+install -Dpm 0644 data/dexhid-hid.service %{buildroot}%{_unitdir}/dexhid-hid.service
 install -Dpm 0644 data/70-dexhid.rules %{buildroot}%{_udevrulesdir}/70-dexhid.rules
 install -Dpm 0644 data/org.dexhid.DexHid1.xml %{buildroot}%{_datadir}/dbus-1/interfaces/org.dexhid.DexHid1.xml
 install -Dpm 0644 data/dexhid.desktop %{buildroot}%{_sysconfdir}/xdg/autostart/dexhid.desktop
@@ -66,6 +68,8 @@ install -Dpm 0644 -t %{buildroot}%{_datadir}/dexhid/devices data/devices/*.toml
 %license LICENSE.dependencies cargo-vendor.txt
 %{_bindir}/dexhid
 %{_userunitdir}/dexhid.service
+%{_unitdir}/dexhid-hid.socket
+%{_unitdir}/dexhid-hid.service
 %{_udevrulesdir}/70-dexhid.rules
 %{_datadir}/dbus-1/interfaces/org.dexhid.DexHid1.xml
 %config(noreplace) %{_sysconfdir}/xdg/autostart/dexhid.desktop

@@ -412,6 +412,11 @@ fn key_label(k: &PlacedKey, m: &UiModel, labels: Option<&crate::xkb::Labels>) ->
         KeyKind::Action(Action::LayoutNext) => "Layout".into(),
         KeyKind::Action(Action::KeyboardHide) => "Hide".into(),
         KeyKind::Action(Action::Fn) => "Fn".into(),
+        KeyKind::Action(Action::SelectMode) => "Select".into(),
+        KeyKind::Action(Action::Joystick) => "\u{2725} stick".into(),
+        KeyKind::Action(Action::EmojiPanel) => "Emoji".into(),
+        KeyKind::Action(Action::Timer(t)) => format!("Timer {}", t),
+        KeyKind::Action(Action::Laser) => "Laser".into(),
         KeyKind::Gap => String::new(),
     }
 }
@@ -460,6 +465,9 @@ fn draw_key(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, p: &Palette, k: &Placed
     let on = match &k.kind {
         KeyKind::Code(c) => m.latched.iter().any(|(l, _)| l == c) || (*c == 58 && m.leds.0) || (*c == 69 && m.leds.1),
         KeyKind::Action(Action::Fn) => m.fn_on,
+        // M3: select-while-moving on, laser on
+        KeyKind::Action(Action::SelectMode) => m.select,
+        KeyKind::Action(Action::Laser) => m.laser,
         _ => false,
     };
     let col = if lit { p.accent } else if sym { p.key } else { p.key_mod };
@@ -524,6 +532,25 @@ fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, labels: Option<&crat
             cv.round_rect(&r.rect, ppm * 2.0 * cr, p.zone);
         }
     }
+    // M3: the presentation laser area
+    if m.laser {
+        if let Some(r) = m.regions.iter().find(|r| r.id == dexhid_core::arrangement::TOUCHPAD) {
+            cv.outline(&r.rect.inset(ppm * 1.0), ppm * 0.8, 0xffd04040);
+            f.draw_centered(cv, &Rect::new(r.rect.x, r.rect.bottom() - ppm * 9.0, r.rect.w, ppm * 7.0), "laser pointer: the pad is the monitor", ppm * 3.0, p.text_dim);
+        }
+    }
+    // M3: bands (word suggestions, clipboard history)
+    for b in &m.bands {
+        cv.fill(&b.rect, p.strip);
+        cv.fill(&Rect::new(b.rect.x, b.rect.bottom() - ppm * 0.15, b.rect.w, ppm * 0.15), p.pad_edge);
+        if b.chips.is_empty() && !b.empty.is_empty() {
+            f.draw_left(cv, &Rect::new(b.rect.x + ppm * 3.0, b.rect.y, b.rect.w, b.rect.h), &b.empty, b.rect.h * 0.32, p.text_dim);
+        }
+        for (l, r) in &b.chips {
+            cv.round_rect(r, ppm * 1.5, p.btn);
+            f.draw_centered(cv, r, l, (r.h * 0.4).min(ppm * 3.6), p.text);
+        }
+    }
     if let Some((l, r)) = &m.zones {
         cv.fill(&l.inset(ppm * 0.6), p.zone);
         cv.fill(&r.inset(ppm * 0.6), p.zone);
@@ -582,8 +609,17 @@ fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, labels: Option<&crat
             f.draw_left(cv, &lr, &r.title, ppm * 3.4, if r.live { p.text } else { p.text_dim });
         }
     }
+    // M3: the emoji panel card (over the keys, like the settings sheet)
+    if let Some(e) = &m.emoji {
+        cv.round_rect(&e.rect, ppm * 3.0, p.card);
+    }
     for b in &m.buttons {
-        let sel = matches!(b.btn, Btn::SheetTab(i) if m.sheet.as_ref().is_some_and(|s| s.tab == i as usize));
+        let sel = matches!(b.btn, Btn::SheetTab(i) if m.sheet.as_ref().is_some_and(|s| s.tab == i as usize)) || matches!(b.btn, Btn::EmojiTab(i) if m.emoji.as_ref().is_some_and(|e| e.page == i as usize));
+        if matches!(b.btn, Btn::Emoji(_)) {
+            cv.round_rect(&b.rect, ppm * 1.5, p.btn);
+            f.draw_centered(cv, &b.rect, &b.label, b.rect.h * 0.62, p.text);
+            continue;
+        }
         draw_button(cv, f, ppm, &p, &b.rect, &b.label, sel);
     }
 }
@@ -614,6 +650,32 @@ fn draw_dynamic(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, labels: Option<&cra
     }
     d
 }
+/// M3: the mirror preview frame (scaled into its rect, nearest neighbour); a placeholder until the first frame
+fn draw_mirror(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, frame: Option<&(u32, u32, Vec<u32>)>) -> Option<(i32, i32, i32, i32)> {
+    let r = m.mirror?;
+    let p = pal(m);
+    let d = cv.damage_of(&r);
+    match frame {
+        Some((w, h, px)) if *w > 0 && *h > 0 => {
+            let (x0, y0, x1, y1) = (d.0.max(0), d.1.max(0), (d.0 + d.2).min(cv.bw), (d.1 + d.3).min(cv.bh));
+            let (dw, dh) = ((x1 - x0).max(1) as u32, (y1 - y0).max(1) as u32);
+            for y in y0..y1 {
+                let sy = ((y - y0) as u32 * h / dh).min(h - 1);
+                for x in x0..x1 {
+                    let sx = ((x - x0) as u32 * w / dw).min(w - 1);
+                    cv.px[(y * cv.bw + x) as usize] = px[(sy * w + sx) as usize];
+                }
+            }
+            cv.outline(&r, m.px_per_mm * 0.3, p.pad_edge);
+        }
+        _ => {
+            cv.round_rect(&r, m.px_per_mm * 1.5, 0xe0101318);
+            f.draw_centered(cv, &r, "mirror preview: waiting for the screen", m.px_per_mm * 2.6, p.text_dim);
+        }
+    }
+    Some(d)
+}
+
 fn prompt_layout(w: f32, h: f32, ppm: f32) -> (Rect, Vec<(Rect, Hit, &'static str)>) {
     let cw = (150.0 * ppm).min(w * 0.94);
     let ch = (78.0 * ppm).min(h * 0.9);
@@ -695,7 +757,7 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
         return lost("neither zwlr_layer_shell_v1 nor xdg_wm_base".into());
     }
     let mut fonts = Fonts::load();
-    println!("UI-FONT path={} ok={}", fonts.path, fonts.ok());
+    println!("UI-FONT path={} ok={} emoji={}", fonts.path, fonts.ok(), fonts.emoji_path);
     let mut labels: Option<crate::xkb::Labels> = None;
     let mut labels_gen: u64 = 1;
     let mut last_keymap: Option<String> = None;
@@ -710,6 +772,10 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
     let mut last_geo: Option<Geometry> = None;
     let codes = keycodes::all_codes();
     let mut last_legends = String::new();
+    // M3: legends of another device's keyboard language; the labels published for the daemon
+    let mut over_name: Option<String> = None;
+    let mut published_gen = 0u64;
+    let mut mirror_seen = 0u64;
 
     let internal = |outs: &[OutInfo]| -> Option<usize> {
         if cfg.internal_output != "auto" {
@@ -738,11 +804,41 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
                 Ok(l) => {
                     println!("XKB layouts={} group={} names={:?} labelled={} sample={}", l.layouts.len(), l.group, l.layouts, l.map.len(), [16u16, 17, 21, 44].iter().map(|c| l.map.get(c).map(|x| x[0].clone()).unwrap_or_default()).collect::<String>());
                     sh.send(Cmd::Labels(l.map.len()));
-                    labels = Some(l);
+                    if over_name.is_none() {
+                        labels = Some(l);
+                    }
                 }
                 Err(e) => println!("XKB {} (legends stay US)", e),
             }
             labels_gen += 1;
+            need_draw = true;
+        }
+        let lo = sh.legend_layout.lock().unwrap().clone();
+        if lo != over_name {
+            over_name = lo.clone();
+            labels = match &lo {
+                Some(lay) => match crate::xkb::keymap_from_layout(lay).and_then(|k| crate::xkb::labels(&k, 0, &codes)) {
+                    Ok(l) => {
+                        println!("XKB target layout={} labelled={} sample={}", lay, l.map.len(), [16u16, 17, 21, 44].iter().map(|c| l.map.get(c).map(|x| x[0].clone()).unwrap_or_default()).collect::<String>());
+                        Some(l)
+                    }
+                    Err(e) => {
+                        println!("XKB target layout {}: {} (desktop legends kept)", lay, e);
+                        last_keymap.as_deref().and_then(|k| crate::xkb::labels(k, cur_group, &codes).ok())
+                    }
+                },
+                None => last_keymap.as_deref().and_then(|k| crate::xkb::labels(k, cur_group, &codes).ok()),
+            };
+            labels_gen += 1;
+            need_draw = true;
+        }
+        if published_gen != labels_gen {
+            published_gen = labels_gen;
+            *sh.labels.lock().unwrap() = labels.as_ref().map(|l| l.map.clone()).unwrap_or_default();
+        }
+        let mg = sh.mirror_gen.load(Ordering::SeqCst);
+        if mg != mirror_seen {
+            mirror_seen = mg;
             need_draw = true;
         }
         // what should be shown
@@ -934,7 +1030,14 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
                                 damage.extend(prev.iter().copied());
                                 damage.extend(s.last_dyn.iter().copied());
                             }
-                            let d = draw_dynamic(&mut cv, &mut fonts, model, labels.as_ref());
+                            let mut d = draw_dynamic(&mut cv, &mut fonts, model, labels.as_ref());
+                            // M3: the mirror preview (redrawn with every frame)
+                            if model.mirror.is_some() {
+                                let fr = sh.mirror.lock().unwrap();
+                                if let Some(md) = draw_mirror(&mut cv, &mut fonts, model, fr.as_ref()) {
+                                    d.push(md);
+                                }
+                            }
                             damage.extend(d.iter().copied());
                             pool.bufs[bi].dyn_rects = d.clone();
                             pool.bufs[bi].key = static_key;
@@ -1080,6 +1183,14 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
         cfg.laptop = true;
         cfg.laptop_pad_pct = a.f64("--pad-pct", 100.0) as f32;
     }
+    // M3 render options
+    cfg.clip_band = a.flag("--bands");
+    cfg.suggest_band = a.flag("--bands");
+    cfg.emoji = a.flag("--bands") || a.val("--emoji").is_some();
+    cfg.mirror_pct = if a.flag("--mirror") { 35.0 } else { 0.0 };
+    cfg.textedit = a.flag("--select");
+    cfg.laser = a.flag("--laser");
+    cfg.target_label = a.val("--target");
     let mut r = Router::new(cfg, l);
     // M2.1: the desktop look from a kdeglobals file (+ optional plasmashellrc)
     if let Some(f) = a.val("--desk") {
@@ -1098,8 +1209,26 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
     if let Some(t) = a.val("--theme") {
         r.set_theme(&t, &a.val("--accent").unwrap_or_else(|| "#4a8be0".into()), a.val("--key-alpha").and_then(|v| v.parse().ok()).unwrap_or(100));
     }
-    r.set_info("84 % charging  |  DP-1");
+    r.set_info(&a.val("--info").unwrap_or_else(|| "84 % charging  |  DP-1".into()));
     r.set_geometry(g);
+    if a.flag("--bands") {
+        r.set_clips(vec!["git status".into(), "https://example.org/docs/page".into(), "Meeting at 10:30 tomorrow".into(), "PNG 214 KB".into()]);
+        r.set_suggestions(vec!["the".into(), "that".into(), "this".into()]);
+    }
+    if let Some(pg) = a.val("--emoji").and_then(|v| v.parse::<usize>().ok()) {
+        r.toggle_emoji();
+        if pg > 0 {
+            use dexhid_core::mt::Contact;
+            if let Some(t) = r.model().buttons.iter().find(|b| b.name == format!("emoji.tab.{}", pg)).map(|b| b.rect) {
+                let (x, y) = g.logical_to_touch(t.x + t.w / 2.0, t.y + t.h / 2.0);
+                r.contact(Contact::Down { id: 920, x, y, major: 10 }, 9000);
+                r.contact(Contact::Up { id: 920 }, 9030);
+            }
+        }
+    }
+    if a.flag("--select") {
+        r.toggle_select();
+    }
     if a.flag("--edit") || a.flag("--guides") {
         // long press on the strip -> edit mode (as a user would)
         use dexhid_core::mt::Contact;
@@ -1177,7 +1306,19 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
         let mut cv = Canvas { px: &mut px, bw, bh, scale };
         draw_static(&mut cv, &mut fonts, &m, labels.as_ref());
         draw_dynamic(&mut cv, &mut fonts, &m, labels.as_ref());
+        // M3: a synthetic preview frame (a gradient with a "window") for the mirror render
+        if a.flag("--mirror") {
+            let (w, h) = (480u32, 270u32);
+            let px: Vec<u32> = (0..w * h)
+                .map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    if (120..360).contains(&x) && (60..210).contains(&y) { 0xffe8e8e8 } else { 0xff000000 | (30 + x * 60 / w) << 16 | (50 + y * 80 / h) << 8 | 120 }
+                })
+                .collect();
+            draw_mirror(&mut cv, &mut fonts, &m, Some(&(w, h, px)));
+        }
     }
+    println!("FONT emoji={}", fonts.emoji_path);
     println!("{}", legends_line(&m, labels.as_ref()));
     let mut f = format!("P6\n{} {}\n255\n", bw, bh).into_bytes();
     for p in &px {

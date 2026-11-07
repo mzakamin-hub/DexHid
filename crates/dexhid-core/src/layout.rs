@@ -90,6 +90,16 @@ pub enum Action {
     KeyboardHide,
     /// M2: the Fn layer key (hold, or tap to lock)
     Fn,
+    /// M3 text editing: select-while-moving on / off ("select:toggle")
+    SelectMode,
+    /// M3 text editing: the cursor joystick ("joystick"; a drag repeats arrows, faster further out)
+    Joystick,
+    /// M3: open the emoji panel ("emoji:panel")
+    EmojiPanel,
+    /// M3 presentation: the talk timer ("timer:toggle" / "timer:reset")
+    Timer(String),
+    /// M3 presentation: laser pointer on / off ("laser:toggle")
+    Laser,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -329,6 +339,12 @@ fn parse_action(a: &str) -> Option<Action> {
         "layout:next" => Some(Action::LayoutNext),
         "keyboard:hide" => Some(Action::KeyboardHide),
         "fn" => Some(Action::Fn),
+        "select:toggle" => Some(Action::SelectMode),
+        "joystick" => Some(Action::Joystick),
+        "emoji:panel" => Some(Action::EmojiPanel),
+        "timer:toggle" => Some(Action::Timer("toggle".into())),
+        "timer:reset" => Some(Action::Timer("reset".into())),
+        "laser:toggle" => Some(Action::Laser),
         _ => None,
     }
 }
