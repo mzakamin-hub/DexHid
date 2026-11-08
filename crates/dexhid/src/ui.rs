@@ -1334,7 +1334,18 @@ fn render_window(a: &crate::debug::Args, out: &str) -> i32 {
     let (w, h) = (a.f64("--win-w", 1696.0) as f32, a.f64("--win-h", 1128.0) as f32);
     let ppm = a.f64("--ppm", 1696.0 / 274.0) as f32;
     let scale = a.f64("--scale", 1.0) as f32;
-    let v = crate::appwin::debug_view(&page, debug_layouts(a), a.flag("--monitor"));
+    let mut v = crate::appwin::debug_view(&page, debug_layouts(a), a.flag("--monitor"));
+    // M4 mode switch states: --mode usb|pad|screen, --usb-hint host|none, --usb-line TEXT, --detail TEXT
+    if let Some(m) = a.val("--mode") {
+        v.mode = m;
+    }
+    v.usb_hint = a.val("--usb-hint").unwrap_or_default();
+    if let Some(s) = a.val("--usb-line") {
+        v.usb_line = s;
+    }
+    if let Some(s) = a.val("--detail") {
+        v.mode_detail = s;
+    }
     let theme = a.val("--theme").unwrap_or_else(|| "dark".into());
     let p = match a.val("--desk") {
         Some(f) => {
@@ -1350,8 +1361,9 @@ fn render_window(a: &crate::debug::Args, out: &str) -> i32 {
     let mut px = vec![0u32; (bw * bh) as usize];
     let mut fonts = Fonts::load();
     let pressed = a.val("--press-hit").and_then(|s| match s.as_str() {
-        "pad" => Some(crate::appwin::WinHit::StartPad),
-        "usb" => Some(crate::appwin::WinHit::StartUsb),
+        "usb" => Some(crate::appwin::WinHit::Mode(0)),
+        "pad" => Some(crate::appwin::WinHit::Mode(1)),
+        "screen" => Some(crate::appwin::WinHit::Mode(2)),
         _ => None,
     });
     let l = {
@@ -1631,7 +1643,7 @@ pub fn bench_debug(a: &crate::debug::Args) -> i32 {
         let v = crate::appwin::debug_view("home", lays.clone(), true);
         let p = feedback::palette("dark", "#4a8be0", 100);
         let l = crate::appwin::layout(w, h, ppm, &v);
-        let br = l.hits.iter().find(|x| x.1 == crate::appwin::WinHit::StartPad).map(|x| x.0).unwrap_or(Rect::new(0.0, 0.0, 1.0, 1.0));
+        let br = l.hits.iter().find(|x| x.1 == crate::appwin::WinHit::Mode(1)).map(|x| x.0).unwrap_or(Rect::new(0.0, 0.0, 1.0, 1.0));
         let t = crate::look::Tokens::new(ppm, 1.0);
         let c = crate::look::Roles::from(&p);
         let mut tv = vec![];

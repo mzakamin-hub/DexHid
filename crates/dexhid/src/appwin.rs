@@ -22,14 +22,17 @@ pub struct WinView {
     /// the rows of the selected module: title, value, kind
     pub rows: Vec<(String, String, Option<Kind>)>,
     pub subtitle: String,
-    /// "idle" | "pad" | "usb" and a one-line detail
+    /// the persisted `mode_select`: "usb" | "pad" | "screen" (the one mode switch on Home)
     pub mode: String,
+    /// what runs now, one line ("Keyboard + touchpad on DP-1", "Waiting for a host", "Released")
     pub mode_detail: String,
-    /// an external monitor is connected (Start touchpad mode is possible)
+    /// an external monitor is connected (the pad mode is possible), its connector name
     pub monitor: bool,
+    pub monitor_name: String,
     /// the USB HID line (power in, data role, host state)
     pub usb_line: String,
-    pub usb_ready: bool,
+    /// USB hint when the mode cannot work as is: "host" (port is in host role) | "none" (nothing attached) | ""
+    pub usb_hint: String,
     /// (name, title) of the layouts, and the current one
     pub layouts: Vec<(String, String)>,
     pub layout: String,
@@ -40,8 +43,8 @@ pub struct WinView {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WinHit {
     Nav(u8),
-    StartPad,
-    StartUsb,
+    /// the mode switch: 0 = USB keyboard + mouse, 1 = keyboard + touchpad for the monitor, 2 = second screen
+    Mode(u8),
     Layout(u8),
     RowToggle(u8),
     RowChoice(u8),
@@ -86,19 +89,32 @@ pub fn layout(w: f32, h: f32, ppm: f32, v: &WinView) -> WinLayout {
     l.header = Rect::new(cx, y, cw, t.t_display * 1.5 + t.t_caption * 1.8);
     y = l.header.bottom() + t.s4;
     let bh = t.target.max(11.0 * t.ppm);
+    let _ = bh;
     if v.page == 0 {
-        // two cards side by side when each gets >= 80 mm, else stacked
-        let two = cw >= 2.0 * 80.0 * t.ppm + t.s4;
-        let card_w = if two { (cw - t.s4) / 2.0 } else { cw };
-        let card_h = t.s4 + t.t_label * 1.6 + t.t_caption * 1.5 * 2.0 + t.s3 + bh + t.s4;
-        let a = Rect::new(cx, y, card_w, card_h);
-        let b = if two { Rect::new(cx + card_w + t.s4, y, card_w, card_h) } else { Rect::new(cx, y + card_h + t.s4, card_w, card_h) };
-        for (c, hit) in [(a, WinHit::StartPad), (b, WinHit::StartUsb)] {
-            l.cards.push(c);
-            let br = Rect::new(c.x + t.s4, c.bottom() - t.s4 - bh, (c.w - 2.0 * t.s4).min(70.0 * t.ppm), bh);
-            l.hits.push((br, hit));
+        // the mode card: one segmented switch (3 segments side by side when each gets >= 46 mm, else stacked
+        // full-width rows), then the selected mode's detail: live line + hint
+        let inner = (cw - 2.0 * t.s4).max(1.0);
+        let horiz = inner >= 3.0 * 46.0 * t.ppm;
+        let seg_h = if horiz { 17.0 * t.ppm } else { t.target.max(12.0 * t.ppm) };
+        let switch_h = if horiz { seg_h } else { 3.0 * seg_h };
+        let detail_h = t.s3 + t.t_caption * 1.6 * 3.0;
+        let ch = t.s4 + t.t_label * 1.6 + t.s2 + switch_h + 2.0 * t.ppm * 0.5 + detail_h + t.s4;
+        let c = Rect::new(cx, y, cw, ch);
+        l.cards.push(c);
+        let sw = Rect::new(c.x + t.s4, c.y + t.s4 + t.t_label * 1.6 + t.s2, inner, switch_h + t.ppm);
+        l.cards.push(sw);
+        let p = t.ppm * 0.5;
+        for i in 0..3u8 {
+            let r = if horiz {
+                let w = (sw.w - 2.0 * p) / 3.0;
+                Rect::new(sw.x + p + i as f32 * w, sw.y + p, w, seg_h)
+            } else {
+                Rect::new(sw.x + p, sw.y + p + i as f32 * seg_h, sw.w - 2.0 * p, seg_h)
+            };
+            l.hits.push((r, WinHit::Mode(i)));
         }
-        y = b.bottom() + t.s4;
+        l.cards.push(Rect::new(c.x + t.s4, sw.bottom() + t.s3, inner, detail_h - t.s3));
+        y = c.bottom() + t.s4;
         // layout picker: chips in a wrapping grid, >= 9 mm tall, columns from the width
         let cols = ((cw - 2.0 * t.s4) / (40.0 * t.ppm)).floor().clamp(1.0, 4.0) as usize;
         let chip_w = (cw - 2.0 * t.s4 - (cols - 1) as f32 * t.s2) / cols as f32;
@@ -168,66 +184,114 @@ pub fn draw(cv: &mut Canvas, f: &mut Fonts, p: &Palette, w: f32, h: f32, ppm: f3
     let hit_of = |want: WinHit| l.hits.iter().find(|(_, x)| *x == want).map(|(r, _)| *r);
     // header
     let hd = l.header;
-    let (title, sub) = if v.page == 0 { ("Home".to_string(), "Touchpad + keyboard for an external display, or a USB keyboard + mouse for another computer".to_string()) } else { (v.modules.get(v.page - 1).cloned().unwrap_or_default(), v.subtitle.clone()) };
+    let (title, sub) = if v.page == 0 { ("Home".to_string(), "One switch: USB keyboard + mouse, keyboard + touchpad for the monitor, or a plain second screen".to_string()) } else { (v.modules.get(v.page - 1).cloned().unwrap_or_default(), v.subtitle.clone()) };
     f.text(cv, &Rect::new(hd.x, hd.y, hd.w * 0.6, t.t_display * 1.5), &title, t.t_display, c.text, Align::Left, 0.7);
     if !sub.is_empty() {
         f.text(cv, &Rect::new(hd.x, hd.y + t.t_display * 1.5, hd.w, t.t_caption * 1.8), &sub, t.t_caption, c.text_dim, Align::Left, 0.85);
     }
     if v.page == 0 {
-        // mode status pill (top right of the header)
-        let (dot, label) = match v.mode.as_str() {
-            "pad" => (c.accent, "Touchpad mode"),
-            "usb" => (0xff3fb27f, "USB keyboard + mouse"),
-            _ => (c.text_dim, "Idle"),
+        let sel_idx: u8 = match v.mode.as_str() {
+            "usb" => 0,
+            "pad" => 1,
+            _ => 2,
+        };
+        // status pill (top right of the header): what runs now
+        let (dot, label) = match sel_idx {
+            0 => (if v.usb_hint.is_empty() { 0xff3fb27f } else { c.edit }, "USB keyboard + mouse"),
+            1 => (if v.monitor { c.accent } else { c.edit }, "Keyboard + touchpad"),
+            _ => (c.text_dim, "Second screen"),
         };
         let text = format!("{}  \u{b7}  {}", label, v.mode_detail);
-        let pw = (f.measure(&text, t.t_caption, cv.scale) + t.s8 + t.s3).min(hd.w * 0.5);
+        let pw = (f.measure(&text, t.t_caption, cv.scale) + t.s8 + t.s3).min(hd.w * 0.45);
         let pr = Rect::new(hd.right() - pw, hd.y + t.s1, pw, t.ppm * 7.0);
         cv.rrect(&pr, pr.h / 2.0, c.raised | 0xff00_0000);
         cv.rrect_ring(&pr, pr.h / 2.0, t.hair, c.hairline);
         cv.disc(pr.x + t.s3 + t.ppm * 0.8, pr.y + pr.h / 2.0, t.ppm * 1.0, dot);
         f.text(cv, &Rect::new(pr.x + t.s3 + t.ppm * 2.6, pr.y, pr.w - t.s4 - t.ppm * 2.6, pr.h), &text, t.t_caption, c.text, Align::Left, 0.85);
-        let cards: [(Icon, &str, String, String, WinHit, bool); 2] = [
-            (
-                Icon::Display,
-                "Touchpad + keyboard",
-                "The tablet screen becomes a touchpad and keyboard for the external display.".into(),
-                if v.monitor { "Monitor connected: ready".into() } else { "Connect a monitor over USB-C to start".into() },
-                WinHit::StartPad,
-                v.monitor,
-            ),
-            (Icon::Usb, "USB keyboard + mouse", "The tablet types and points on another computer over USB-C.".into(), v.usb_line.clone(), WinHit::StartUsb, v.usb_ready),
+        // the mode card
+        let cr = l.cards[0];
+        cv.shadow(&cr, t.r_lg, t.s1, c.shadow / 2);
+        cv.rrect(&cr, t.r_lg, c.raised | 0xff00_0000);
+        cv.rrect_ring(&cr, t.r_lg, t.hair, c.hairline);
+        f.text(cv, &Rect::new(cr.x + t.s4, cr.y + t.s4, cr.w - t.s8, t.t_label * 1.6), "What the tablet does", t.t_label, c.text, Align::Left, 0.8);
+        let sw = l.cards[1];
+        cv.rrect(&sw, t.r_md + t.ppm * 0.5, c.key_mod | 0xff00_0000);
+        let usb_ok = v.usb_hint.is_empty();
+        let segs: [(Icon, &str, String, bool); 3] = [
+            (Icon::Usb, "USB keyboard + mouse", if usb_ok { "for another computer".into() } else if v.usb_hint == "host" { "port is in host role".into() } else { "no computer attached".into() }, true),
+            (Icon::Display, "Keyboard + touchpad", if v.monitor { format!("for {}", if v.monitor_name.is_empty() { "the monitor" } else { &v.monitor_name }) } else { "no monitor connected".into() }, v.monitor),
+            (Icon::Desktop, "Second screen", "tablet stays a normal screen".into(), true),
         ];
-        for (k, (ic, head, body, status, hit, enabled)) in cards.iter().enumerate() {
-            let cr = l.cards[k];
-            cv.shadow(&cr, t.r_lg, t.s1, c.shadow / 2);
-            cv.rrect(&cr, t.r_lg, c.raised | 0xff00_0000);
-            cv.rrect_ring(&cr, t.r_lg, t.hair, c.hairline);
-            let ib = Rect::new(cr.x + t.s4, cr.y + t.s4, t.t_label * 1.6, t.t_label * 1.6);
-            cv.rrect(&ib, ib.h / 2.0, c.accent_soft);
-            icon(cv, &ib, *ic, ib.h * 0.55, c.accent);
-            f.text(cv, &Rect::new(ib.right() + t.s2, ib.y, cr.w - ib.w - t.s8 - t.s2, ib.h), head, t.t_label, c.text, Align::Left, 0.8);
-            let by = ib.bottom() + t.s1;
-            f.text(cv, &Rect::new(cr.x + t.s4, by, cr.w - t.s8, t.t_caption * 1.5), body, t.t_caption, c.text_dim, Align::Left, 0.8);
-            let scol = if *enabled { c.text } else { c.edit };
-            let sr = Rect::new(cr.x + t.s4, by + t.t_caption * 1.5, cr.w - t.s8, t.t_caption * 1.5);
-            if *ic == Icon::Usb {
-                icon(cv, &Rect::new(sr.x, sr.y, t.icon * 0.8, sr.h), Icon::Bolt, t.icon * 0.7, c.text_dim);
-                f.text(cv, &Rect::new(sr.x + t.icon, sr.y, sr.w - t.icon, sr.h), status, t.t_caption, scol, Align::Left, 0.8);
-            } else {
-                f.text(cv, &sr, status, t.t_caption, scol, Align::Left, 0.8);
+        let horiz = l.hits.iter().filter(|(_, x)| matches!(x, WinHit::Mode(_))).map(|(r, _)| r.y).fold(f32::NAN, |a, y| if a.is_nan() || (a - y).abs() < 0.5 { y } else { -1.0 }) >= 0.0;
+        for (r, hit) in l.hits.iter().filter(|(_, x)| matches!(x, WinHit::Mode(_))) {
+            let WinHit::Mode(i) = *hit else { continue };
+            let (ic, name, sub, enabled) = &segs[i as usize];
+            let sel = i == sel_idx;
+            let down = pressed == Some(*hit) && *enabled;
+            if sel || down {
+                cv.shadow(r, t.r_md, t.ppm * 0.6, c.shadow / 2);
+                cv.rrect(r, t.r_md, if down && !sel { c.accent_soft } else { c.accent });
             }
-            if let Some(br) = hit_of(*hit) {
-                let label = if *hit == WinHit::StartPad { "Start touchpad mode" } else { "Start USB mode" };
-                if *enabled {
-                    button(cv, f, &t, &c, &br, label, Some(Icon::Play), Tone::Filled, pressed == Some(*hit));
+            let (fg, fg2) = if sel { (c.on_accent, (c.on_accent & 0x00ff_ffff) | 0xc0 << 24) } else if *enabled { (c.text, c.text_dim) } else { ((c.text_dim & 0x00ff_ffff) | 0x90 << 24, c.edit) };
+            let isz = t.icon;
+            if horiz {
+                // icon on top, name, sub line
+                let gy = r.y + (r.h - (isz + t.s1 + t.t_label * 1.25 + t.t_caption * 1.3)) / 2.0;
+                icon(cv, &Rect::new(r.x, gy, r.w, isz), *ic, isz, fg);
+                f.text(cv, &Rect::new(r.x + t.s2, gy + isz + t.s1, r.w - t.s4, t.t_label * 1.25), name, t.t_label, fg, Align::Center, 0.75);
+                f.text(cv, &Rect::new(r.x + t.s2, gy + isz + t.s1 + t.t_label * 1.25, r.w - t.s4, t.t_caption * 1.3), sub, t.t_caption, fg2, Align::Center, 0.8);
+            } else {
+                // a row: icon, name, sub line right-aligned
+                icon(cv, &Rect::new(r.x + t.s3, r.y, isz, r.h), *ic, isz, fg);
+                let nx = r.x + t.s3 + isz + t.s3;
+                let nw = f.measure(name, t.t_label, cv.scale).min(r.right() - nx - t.s3);
+                f.text(cv, &Rect::new(nx, r.y, nw + 1.0, r.h), name, t.t_label, fg, Align::Left, 0.75);
+                f.text(cv, &Rect::new(nx + nw + t.s3, r.y, (r.right() - nx - nw - t.s6).max(0.0), r.h), sub, t.t_caption, fg2, Align::Right, 0.8);
+            }
+            if sel {
+                let d = t.ppm * 1.2;
+                cv.disc(r.right() - t.s2 - d, r.y + t.s2 + d, d, c.on_accent);
+                icon(cv, &Rect::new(r.right() - t.s2 - 2.0 * d, r.y + t.s2, 2.0 * d, 2.0 * d), Icon::Check, d * 1.5, c.accent);
+            }
+        }
+        // the selected mode's detail: live line + hint
+        let dr = l.cards[2];
+        let lh = t.t_caption * 1.6;
+        let line = |cv: &mut Canvas, f: &mut Fonts, k: usize, ic: Option<Icon>, s: &str, col: u32| {
+            let y = dr.y + k as f32 * lh;
+            let mut x = dr.x;
+            if let Some(i) = ic {
+                icon(cv, &Rect::new(x, y, t.icon * 0.8, lh), i, t.icon * 0.7, col);
+                x += t.icon;
+            }
+            f.text(cv, &Rect::new(x, y, dr.right() - x, lh), s, t.t_caption, col, Align::Left, 0.85);
+        };
+        match sel_idx {
+            0 => {
+                line(cv, f, 0, None, "The tablet is the keyboard and mouse of another computer over USB-C (typing, pad, quick actions).", c.text_dim);
+                line(cv, f, 1, Some(Icon::Bolt), &v.usb_line, c.text);
+                match v.usb_hint.as_str() {
+                    "host" => line(cv, f, 2, Some(Icon::Close), "The port is in host role (a hub or a device is attached). Connect the tablet directly to the computer.", c.edit),
+                    "none" => line(cv, f, 2, Some(Icon::Usb), "Nothing attached: plug a USB-C cable into the computer. Keys go to it as soon as it enumerates.", c.edit),
+                    _ => {}
+                }
+            }
+            1 => {
+                line(cv, f, 0, None, "The tablet screen becomes a keyboard and touchpad for the external display.", c.text_dim);
+                if v.monitor {
+                    line(cv, f, 1, Some(Icon::Display), &format!("{} connected: pad mode starts at once; Exit or a 5-finger hold returns here", if v.monitor_name.is_empty() { "Monitor" } else { &v.monitor_name }), c.text);
                 } else {
-                    button(cv, f, &t, &c, &br, label, Some(Icon::Play), Tone::Tonal, false);
-                    cv.rrect(&br, t.r_md, (c.raised & 0x00ff_ffff) | 0x99 << 24);
+                    line(cv, f, 1, Some(Icon::Display), "No external display connected. Connect a monitor over USB-C, then choose this mode.", c.edit);
+                }
+            }
+            _ => {
+                line(cv, f, 0, None, "DexHid releases the touchscreen and keys go to this desktop; the tablet stays a normal (extended) screen.", c.text_dim);
+                if v.monitor {
+                    line(cv, f, 1, Some(Icon::Check), "No prompt for this monitor until it is plugged in again or another mode is chosen.", c.text);
                 }
             }
         }
-        if let Some(cr) = l.cards.get(2) {
+        if let Some(cr) = l.cards.get(3) {
             cv.shadow(cr, t.r_lg, t.s1, c.shadow / 2);
             cv.rrect(cr, t.r_lg, c.raised | 0xff00_0000);
             cv.rrect_ring(cr, t.r_lg, t.hair, c.hairline);
@@ -304,11 +368,12 @@ pub fn debug_view(page: &str, layouts: Vec<(String, String)>, monitor: bool) -> 
         modules: mods.iter().map(|m| m.title.to_string()).collect(),
         rows,
         subtitle: if pi > 0 { "Changes apply at once and are saved to settings.toml".into() } else { String::new() },
-        mode: "idle".into(),
+        mode: "screen".into(),
         mode_detail: if monitor { "DP-1 connected".into() } else { "no external display".into() },
         monitor,
+        monitor_name: if monitor { "DP-1".into() } else { String::new() },
         usb_line: "USB waiting for a host  |  no USB power in  |  data role device".into(),
-        usb_ready: true,
+        usb_hint: String::new(),
         layout: "full".into(),
         layouts,
         scroll: 0.0,
