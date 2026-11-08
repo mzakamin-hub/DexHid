@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `dexhid daemon`: the core thread. Owns the touchscreen grab, the virtual touchpad / mouse, the state machine and
 //! the router; the virtual keyboard lives in the key guardian process (guardian.rs). The UI, D-Bus, logind, desktop
 //! and layout-tracker threads talk to it through `Cmd` + a wake pipe.
@@ -182,7 +182,7 @@ pub fn run(opts: Opts) -> i32 {
     let (wake_rd, wake_wr) = wake_pipe();
     WAKE_FD.store(wake_wr, Ordering::SeqCst);
     let (ui_rd, ui_wr) = wake_pipe();
-    println!("DEXHID daemon {} pid={} t={} debug={} (GPL-3.0-or-later PROVISIONAL)", env!("CARGO_PKG_VERSION"), std::process::id(), mono_ms(), opts.debug);
+    println!("DEXHID daemon {} pid={} t={} debug={} (GPL-3.0-or-later)", env!("CARGO_PKG_VERSION"), std::process::id(), mono_ms(), opts.debug);
 
     let cfg_home = env_dir("XDG_CONFIG_HOME", ".config");
     let state_home = env_dir("XDG_STATE_HOME", ".local/state");

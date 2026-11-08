@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M3: `dexhid hid-helper` - the small privileged helper of the USB HID mode (root: configfs, the UDC). The user
 //! daemon connects over a unix seqpacket socket (`/run/dexhid/hid.sock`, systemd socket unit or started by hand);
 //! the helper checks the peer (root, --allow-uid, or the active seat0 user), does the setup and hands back open file

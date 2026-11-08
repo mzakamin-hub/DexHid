@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Software renderer (M4): anti-aliased rects / rounded rects / rings / discs / soft shadows, a small signed-distance
 //! painter for icons, and text (ab_glyph with a system font) into a premultiplied ARGB8888 / XRGB8888 buffer.
 //! Coordinates are logical px; `scale` maps them to buffer px. Every primitive clips to the canvas clip rect, so a

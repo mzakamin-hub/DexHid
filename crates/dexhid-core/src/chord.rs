@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Emergency release chord (default Volume Up + Volume Down held 2 s), from passively read key devices.
 
 use std::collections::HashSet;

@@ -1,8 +1,8 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DexHid Fedora spec (M4). Builds from a `cargo vendor` tarball (offline); the app-menu entries, the D-Bus
 # activation file and the units come from data/ (wf/dexhid/pkg/prep.sh uses them as they are).
 # Before a Fedora review: rust2rpm with packaged crates where they exist, %%cargo_license_summary, check the
-# current Rust vendoring guideline; licence still provisional.
+# current Rust vendoring guideline. Licence: GPL-3.0-or-later (LICENSE).
 
 %global debug_package %{nil}
 
@@ -11,7 +11,7 @@ Version:        0.1.0
 Release:        0.4.m4%{?dist}
 Summary:        Tablet screen as touchpad and keyboard for an external display
 License:        GPL-3.0-or-later
-# URL: set when the repository goes public (owner account not decided)
+URL:            https://github.com/mzakamin-hub/DexHid
 Source0:        %{name}-%{version}.tar.gz
 Source1:        %{name}-%{version}-vendor.tar.gz
 
@@ -76,7 +76,7 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/org.dexhid.DexHid.Set
 %udev_rules_update
 
 %files
-%license LICENSE.dependencies cargo-vendor.txt
+%license LICENSE LICENSE.dependencies cargo-vendor.txt
 %{_bindir}/dexhid
 %{_userunitdir}/dexhid.service
 %{_unitdir}/dexhid-hid.socket

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Messages into the core thread and the state it shares with the UI and bus threads.
 
 use dexhid_core::geom::Geometry;

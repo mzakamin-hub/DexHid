@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL: licence not decided by the owner yet)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Raw evdev / uinput access through libc ioctls (no evdev crate: fewer dependencies, exact control).
 //! Taken over from the M0 spike (proven on the tablet 7 Nov 2026: grab, EVIOCGMTSLOTS, uinput MT devices).
 #![allow(dead_code)]

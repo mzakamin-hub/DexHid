@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DexHid: give the active seat's user access to /dev/uinput, the internal touchscreen and the volume-key devices
 # (read passively for the release chord). Must sort before 73-seat-late.rules, which applies "uaccess".
 # Security note: uaccess on the touchscreen lets any process of the active user read the panel's touches; limited

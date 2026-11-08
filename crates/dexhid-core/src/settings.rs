@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The settings registry (M2). Every user-visible option is a registered setting inside a module (a feature with an
 //! on/off flag and its options). The settings sheet is built from this table, values are stored as overrides in
 //! `$XDG_CONFIG_HOME/dexhid/settings.toml` (merged into the config after config.toml), and a new feature only adds

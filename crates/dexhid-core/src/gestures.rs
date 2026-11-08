@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M3 gesture shortcuts: 3 / 4-finger swipes (left / right / up / down) and taps on the panel mapped to actions.
 //! With the module on, DexHid recognises these gestures itself (on the touchpad too) instead of handing them to the
 //! desktop: the router keeps at most two fingers on the virtual touchpad, the third one freezes them (lifted only

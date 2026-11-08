@@ -1,5 +1,5 @@
 [Desktop Entry]
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # XDG-autostart fallback for sessions without graphical-session.target: starts the user unit.
 Type=Application
 Name=DexHid

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Quick actions (M2): a configurable bar of action buttons (its own region, movable / resizable in edit mode).
 //! Built-in actions are key chords sent through the virtual keyboard (so the desktop's shortcuts apply; the defaults
 //! follow KDE Plasma), media / volume keys, or commands (argv lists, run as the user, never through a shell).

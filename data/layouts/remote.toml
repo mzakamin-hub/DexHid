@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DexHid layout (M2): media + presentation remote. Big previous / next slide keys (PgUp / PgDn work in most
 # presentation apps), start (F5) / end (Esc), black screen (B), media and volume keys.
 # M3 ("Media / presentation" module): the laser key turns the touchpad into an absolute pointer area, the timer keys

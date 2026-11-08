@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Key legends from the desktop's xkb keymap (the one the compositor sends on wl_keyboard.keymap, which also
 //! applies to our virtual keyboard). libxkbcommon is dlopen()ed: without it the legends stay US.
 

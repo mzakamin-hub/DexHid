@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M3 USB HID mode: the configfs gadget (keyboard + mouse + extra), its teardown, conflict and role checks, and the
 //! port's power state. Pure file operations on a root directory: the privileged helper passes
 //! /sys/kernel/config/usb_gadget, the unit tests a temporary directory (configfs creates attribute files on mkdir

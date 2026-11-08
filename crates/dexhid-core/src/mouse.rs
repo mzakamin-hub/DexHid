@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Relative-mouse fallback (M2, `mode = "mouse"`): our own recognizer for desktops whose touchpad handling is
 //! missing or poor (X11 evdev driver) or as a user choice. Input: the touchpad frames (slot positions in device
 //! units, as sent to the virtual touchpad); output: REL motion, buttons, hi-res wheel. Numbers follow Denial's

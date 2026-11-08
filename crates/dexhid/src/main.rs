@@ -1,5 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL: the owner has not decided the licence yet; change
-// every header before the repository goes public)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! dexhid: the tablet screen as touchpad + keyboard while an external display is connected.
 //! Written from scratch; no Denial code (behaviour numbers cited from Denial's INPUT_DECK.md).
 //!
@@ -178,7 +177,7 @@ fn main() {
             0
         }
         Some("version") | Some("--version") => {
-            println!("dexhid {} (M3, GPL-3.0-or-later PROVISIONAL)", env!("CARGO_PKG_VERSION"));
+            println!("dexhid {} (GPL-3.0-or-later)", env!("CARGO_PKG_VERSION"));
             0
         }
         _ => usage(),

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M3 small feature logic (pure, unit-tested):
 //! - text editing: the cursor joystick (displacement -> arrow key + repeat interval) and select-while-moving;
 //! - presentation: the talk timer;

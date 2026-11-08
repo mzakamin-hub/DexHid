@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M4 design prototype (`dexhid debug render --style m4`, not used by the daemon yet): design tokens (spacing,
 //! radii, type scale, all in mm so they hold at any DPI / scale), colour roles derived from the theme palette (so
 //! dark / light / AMOLED / the desktop's own KDE colours all keep working), a small vector icon set drawn from

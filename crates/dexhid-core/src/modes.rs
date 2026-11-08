@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M4: the app window's one mode switch (owner decision 8 Nov 2026). Three modes, one persisted setting
 //! (`mode_select`, the user's last choice), mapped onto the existing machinery, no second state machine:
 //!

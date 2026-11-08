@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M4: the standalone app window (`dexhid window`, `dexhid settings`, the app menu). A normal xdg_toplevel on the
 //! internal panel, made by the UI thread on request and destroyed on close (nothing exists while it is closed):
 //! works without an external monitor and without grabbing the touchscreen (plain wl_touch / wl_pointer input). A

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DexHid layout (M2.1): a laptop keyboard on a 15-unit grid (every row is 15 units wide), slim function row,
 # arrows in the bottom row. Meant for the "laptop" arrangement preset (square keys, at most 19.05 mm pitch, the
 # keyboard centred and the touchpad below it), works with free placement too.

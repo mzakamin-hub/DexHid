@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DexHid layout (M2): text editing pad. Arrows, word jump (Ctrl+arrows), select (Shift+arrows, Ctrl+Shift+arrows),
 # line / document start and end, clipboard and undo chords. Shortcuts are the common Linux desktop ones.
 # M3 ("Text editing mode" module): the select key turns select-while-moving on / off (Shift is added to every caret

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DexHid layout (M2): numeric keypad / calculator. Big keypad keys plus calculator helpers; with the touchpad next
 # to it. The "Calc" key is a chord of the desktop's calculator shortcut (KDE: none by default: use a quick action
 # with a command instead).

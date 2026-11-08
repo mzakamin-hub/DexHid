@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DexHid configuration example. Copy to ~/.config/dexhid/config.toml (or /etc/dexhid/config.toml) and keep only
 # the keys you change. Merge order: built-in defaults, /usr/share/dexhid/devices/<matching preset>.toml,
 # /etc/dexhid/config.toml, ~/.config/dexhid/config.toml, then `dexhid daemon --config <file>`.

@@ -1,6 +1,6 @@
 <!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
  "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
-<!-- SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+<!-- SPDX-License-Identifier: GPL-3.0-or-later
      DexHid session-bus API. Bus name org.dexhid.DexHid1, object /org/dexhid/DexHid1. This is the contract the
      CLI, desktop plugins and window-manager key bindings use. Methods return "ok" at once; the effect is visible
      in Status() and the StateChanged signal. -->

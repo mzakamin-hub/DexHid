@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! On-screen key state machine. Behaviour (reimplemented from the timing described in Denial's INPUT_DECK.md, no
 //! code copied): a tap commits on release; a stationary hold of `hold_ms` (150 ms) presses the key and keeps it
 //! down so the desktop's own key repeat runs; modifiers press at once; while a modifier is held, other keys press at

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DexHid layout: split keyboard, two halves at the screen edges with the touchpad in the middle.
 # Each half is its own region: move / resize them independently in edit mode.
 name = "split"

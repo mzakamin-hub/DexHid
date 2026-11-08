@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The UI thread: one Wayland connection for the daemon's life. Main surface (one at a time) on the internal output:
 //! - overlay: full-screen layer-shell overlay (exclusive zone -1, no keyboard focus) drawing the pad-mode model;
 //!   input comes from the grabbed evdev device, not from Wayland;

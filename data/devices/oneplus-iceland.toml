@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DexHid device preset: OnePlus Pad 4 ("iceland") on mainline Linux. Selected by the device-tree compatible.
 match_compatible = ["oneplus,iceland"]
 touchscreen = "NVTCapacitiveTouchScreen"

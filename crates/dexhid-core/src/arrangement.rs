@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Where the regions (touchpad, keyboard, keyboard halves, numpad) sit on the panel: one arrangement per keyboard
 //! layout and orientation, stored as fractions of the work area (the panel below the control strip) in
 //! `$XDG_CONFIG_HOME/dexhid/arrangement-<layout>-<landscape|portrait>.toml`. Edit operations (move / resize with

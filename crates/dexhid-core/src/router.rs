@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Pad-mode touch routing. Every contact belongs to the area where it STARTED until it lifts: the control strip,
 //! a settings-sheet button, the touchpad, a keyboard key, a quick action, or (edit mode) a region handle. The router
 //! also owns the on-screen model the UI draws (strip buttons, regions, keys, pressed state, touch dots, the settings

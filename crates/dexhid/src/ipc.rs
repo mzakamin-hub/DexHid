@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M3: unix SOCK_SEQPACKET sockets with file-descriptor passing (SCM_RIGHTS) and peer credentials, for the HID
 //! helper (root) <-> daemon (user) link. One packet = one text message (+ fds).
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! DRM hotplug: kernel uevent parsing and the connector scan of /sys/class/drm.
 
 use std::collections::HashMap;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Session-bus API `org.dexhid.DexHid1` at /org/dexhid/DexHid1 (see data/org.dexhid.DexHid1.xml) and the CLI client.
 //! Methods return at once with a short text; the effect shows in Status() and the StateChanged signal.
 

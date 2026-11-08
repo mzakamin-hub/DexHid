@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! sd_notify (READY / WATCHDOG / STOPPING / STATUS) without libsystemd, and the kernel uevent socket.
 
 use std::os::linux::net::SocketAddrExt;

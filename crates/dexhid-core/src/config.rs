@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Configuration (TOML), merged in order: built-in defaults, /usr/share/dexhid/devices/*.toml (device presets whose
 //! `match_compatible` matches /proc/device-tree/compatible), /etc/dexhid/config.toml,
 //! $XDG_CONFIG_HOME/dexhid/config.toml, then `--config <file>`. Later files override single keys.

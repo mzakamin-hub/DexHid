@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M3 profiles: a full setup (keyboard layout + the area arrangement + quick actions + any settings) saved under a
 //! name, chosen per monitor and optionally per focused application.
 //!

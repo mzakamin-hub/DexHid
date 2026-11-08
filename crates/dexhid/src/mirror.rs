@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M3 mirror preview: a small, low-fps picture of the external monitor in a corner of the touchpad (off by default).
 //! Capture goes through the standard xdg-desktop-portal ScreenCast interface (any desktop with a portal backend):
 //! CreateSession -> SelectSources (one monitor, cursor embedded, persist_mode 2 with the saved restore token, so the

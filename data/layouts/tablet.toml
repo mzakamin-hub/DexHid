@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DexHid layout: simplified tablet keyboard (letters page + a numbers / symbols page, like an on-screen keyboard).
 # The symbols page sends the punctuation keys of the desktop's layout (legends follow xkb); keys that need a
 # modifier for one symbol use combo keys (M2: "LEFTSHIFT+2" = Shift+2; the legend shows what the desktop layout

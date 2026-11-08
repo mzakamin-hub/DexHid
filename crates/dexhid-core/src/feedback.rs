@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Small pure helpers for M2 features that touch the system: the key-click sound (a generated WAV), the status
 //! text of the bar (battery / charger / external display, from sysfs values), the brightness to dim to, the theme
 //! palette, and the physical-keyboard test.

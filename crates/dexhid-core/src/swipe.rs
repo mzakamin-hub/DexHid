@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M2.1: whole-screen 3/4-finger swipe arbitration (behaviour reimplemented from Denial's INPUT_DECK.md, no code
 //! copied). Three or four contacts anywhere on the input screen (keys, strip, quick bar, pad) form a candidate; it
 //! is recognised only when EVERY participant has moved at least `min_px` from where it joined and all movements

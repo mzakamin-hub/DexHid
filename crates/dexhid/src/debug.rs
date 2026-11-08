@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `dexhid debug ...`: test tools for the tablet runner (root). Not used by the daemon.
 //!   list                                   input devices and their roles
 //!   grabtest --dev P                       FREE / BUSY (+ active slots)

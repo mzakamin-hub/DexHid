@@ -1,5 +1,5 @@
 [Desktop Entry]
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # M4: opens the DexHid window at the settings (`dexhid settings --json` prints them for scripts)
 Type=Application
 Name=DexHid Settings

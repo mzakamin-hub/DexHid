@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! logind watcher (system bus): the user's graphical session (User.Display) LockedHint / Active and its Lock /
 //! Unlock signals, Manager.PrepareForSleep with a delay inhibitor (the grab is released before the sleep), LidClosed.
 

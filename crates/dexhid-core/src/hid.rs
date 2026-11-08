@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M3: HID report descriptors and report encoding for the USB HID mode (configfs gadget, /dev/hidgN).
 //! Standard descriptors only:
 //! - keyboard: the boot keyboard of the HID 1.11 spec (appendix E.6), byte-identical to the example in the kernel's

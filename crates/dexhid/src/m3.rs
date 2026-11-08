@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M3 features in the daemon (a child module of daemon.rs, so it extends `D`):
 //! gesture actions, clipboard strip, word suggestions + emoji, presentation timer + laser, pen on the monitor,
 //! profiles (per monitor / per app with a KWin script), the mirror preview, and the USB HID target

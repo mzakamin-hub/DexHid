@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Desktop integration (M2), all off the input thread:
 //! - a worker thread for slow jobs: the KWin InputDevice applier (natural scroll, tap to click, pointer
 //!   acceleration of the virtual touchpad over org.kde.KWin.InputDevice), the panel dimming + restore (logind

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! evdev key codes (linux/input-event-codes.h) by name, with US fallback legends.
 //! Layout files name keys without the `KEY_` prefix (`A`, `LEFTSHIFT`, `F1`, `KP7`, ...); `KEY_A` is accepted too.
 

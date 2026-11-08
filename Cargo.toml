@@ -1,5 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL: the owner has not decided the licence yet;
-# change every header before the repository goes public)
+# SPDX-License-Identifier: GPL-3.0-or-later
 [workspace]
 resolver = "2"
 members = ["crates/dexhid-core", "crates/dexhid"]

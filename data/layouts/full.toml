@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DexHid layout: full PC keyboard (ANSI, 16 units wide), function row optional ("function", on by default),
 # numeric keypad optional ("numpad", off by default; it gets its own movable region).
 # Fn (M2): hold Fn, or tap it to lock the layer: 1-0 - = are F1-F12, F1/F2/F3 mute / volume, F5-F7 media,

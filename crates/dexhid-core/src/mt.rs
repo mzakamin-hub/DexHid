@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! evdev multitouch protocol B -> contact events (down / move / up) at each SYN_REPORT.
 
 use crate::keys::ContactId;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Touchpad region -> virtual multitouch touchpad frames. Contacts are re-based to the pad rect and scaled to device
 //! units; contacts that start in a click zone (bottom strip of the pad, left / right half) press BTN_LEFT / BTN_RIGHT
 //! on the touchpad device instead of becoming fingers (a thumb on a zone + a moving finger = drag).

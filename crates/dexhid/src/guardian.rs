@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The key guardian (M2): a tiny separate process (`dexhid guardian`, no threads, no UI, no bus) that owns the
 //! "dexhid keyboard" uinput device. The daemon sends it key events over a SOCK_SEQPACKET socketpair; the guardian
 //! writes them to uinput and tracks which keys are down.

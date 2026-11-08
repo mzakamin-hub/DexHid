@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL: licence not decided by the owner yet)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Rectangles and the panel-native <-> logical (output) coordinate transforms.
 
 use serde::{Deserialize, Serialize};

@@ -1,5 +1,5 @@
 [Desktop Entry]
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # M4: the app menu entry opens the DexHid window (mode switch, layouts, settings); the actions switch the mode
 # directly. D-Bus activation (org.dexhid.DexHid1.service) starts the user service when it is not running.
 Type=Application

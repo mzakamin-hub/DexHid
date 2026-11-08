@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M3: the HID sink of the USB mode, in the daemon. Same router, different sink: key events become
 //! keyboard / consumer / system reports, touchpad frames go through the relative-mouse recognizer (mouse.rs) and
 //! become mouse reports, the laser / pen give absolute reports. The fds come from the root helper (hidhelper.rs);

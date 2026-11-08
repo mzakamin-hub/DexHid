@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M3 clipboard history for the strip. Two backends:
 //! - KDE Klipper (org.kde.klipper /klipper): the desktop's own history (getClipboardHistoryMenu, the
 //!   clipboardHistoryUpdated signal, setClipboardContents) - text only;

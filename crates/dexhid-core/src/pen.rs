@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! M3 pen on the external monitor. While pad mode is active and the module is on, the daemon grabs the pen
 //! (NVTCapacitivePen) and re-emits it:
 //! - "pointer": a precise relative pointer ("dexhid pen pointer"): hover moves the pointer (no jump when the pen

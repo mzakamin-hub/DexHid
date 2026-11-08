@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The DexHid state machine (plan §1 / §2). `desired` is what the user / monitor asked for; pause flags (lock,
 //! inactive session, sleep, cover closed) override it without forgetting it. `effective()` is what the daemon applies:
 //! grab or not, which UI.

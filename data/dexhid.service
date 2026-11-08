@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# SPDX-License-Identifier: GPL-3.0-or-later
 # DexHid user service: the tablet screen as touchpad + keyboard while an external display is connected.
 # Disabled upstream by default; a device preset package (e.g. iceland) enables it:
 #   systemctl --user enable dexhid.service

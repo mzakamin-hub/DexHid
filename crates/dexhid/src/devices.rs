@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The virtual devices: "dexhid touchpad" (MT protocol B, INPUT_PROP_POINTER, no pressure, the M0 "B" variant that
 //! libinput + KWin classified as a touchpad) and "dexhid keyboard" (EV_KEY only, no EV_REP: the desktop repeats).
 
