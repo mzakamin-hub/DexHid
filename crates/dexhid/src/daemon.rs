@@ -40,6 +40,8 @@ use std::sync::Arc;
 
 /// M4: the watchdog timeout while nothing is grabbed / held (one ping every 5 minutes instead of every 2.5 s)
 const IDLE_WATCHDOG_MS: i64 = 600_000;
+/// M4: how old the UI heartbeat may be before a watchdog ping asks the UI thread first
+const UI_CHECK_MS: i64 = 20_000;
 
 #[derive(Default, Debug)]
 pub struct Opts {
@@ -1509,7 +1511,9 @@ impl D {
     /// while idle (no periodic wake-ups); systemd takes the new value from WATCHDOG_USEC=
     fn watchdog_period(&mut self) -> Option<i64> {
         let w = self.notify.watchdog_ms?;
-        let active = self.grabbed || self.touch.is_some() || self.kbd_on || self.pad.is_some() || self.m3.sink.is_some();
+        // (--debug + DEXHID_DEBUG_WD_ACTIVE=1: the active cadence without a touchscreen, for the PC measurement)
+        let forced = self.opts.debug && std::env::var("DEXHID_DEBUG_WD_ACTIVE").as_deref() == Ok("1");
+        let active = forced || self.grabbed || self.touch.is_some() || self.kbd_on || self.pad.is_some() || self.m3.sink.is_some();
         if self.wd_active != Some(active) {
             self.wd_active = Some(active);
             let ms = if active { w } else { w.max(IDLE_WATCHDOG_MS) };
@@ -1520,7 +1524,8 @@ impl D {
                 println!("WATCHDOG t={} timeout_ms={} ({})", mono_ms(), ms, if active { "active" } else { "idle" });
             }
         }
-        Some(if active { (w / 2).max(100) } else { w.max(IDLE_WATCHDOG_MS) / 2 })
+        // ping at 70 % of the timeout (5 s -> every 3.5 s, 1.5 s margin; one wake-up of this thread per ping)
+        Some(if active { (w * 7 / 10).max(100) } else { w.max(IDLE_WATCHDOG_MS) / 2 })
     }
 
     fn print_geom(&self) {
@@ -1850,11 +1855,14 @@ impl D {
             self.update_status();
             if let Some(p) = self.watchdog_period() {
                 if now - self.last_ping >= p {
-                    // the UI thread sleeps without a timer: ask it for a heartbeat and ping once it answered (it
-                    // pokes us back at once); a UI that does not answer within 2 s gets no ping (systemd restarts)
+                    // The UI thread sleeps without a timer. Its liveness is proved at most every UI_CHECK_MS: a UI
+                    // that ran recently (frames, events) needs no question; otherwise ask it for a heartbeat and ping
+                    // once it answered (it pokes us back at once); no answer within 2 s = no ping (systemd restarts).
+                    // A hung UI does not stop the pad / keys / release paths (they live in this thread), so checking
+                    // it every 20 s instead of every ping costs no safety and saves 2 wake-ups per ping.
                     let hb = self.sh.ui_heartbeat.load(Ordering::SeqCst);
                     match self.hb_asked {
-                        None if now - hb < 300 => {
+                        None if now - hb < UI_CHECK_MS => {
                             self.notify.send("WATCHDOG=1");
                             self.last_ping = now;
                         }

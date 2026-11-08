@@ -73,12 +73,22 @@ pub fn run(a: &crate::debug::Args) -> i32 {
         println!("HIDHELPER left-over gadget removed: {:?}", r.map(|v| v.len()));
     }
     let mut client: Option<i32> = None;
+    // M4: socket-activated, the helper leaves after this long without a client (systemd starts it again on the next
+    // connect; the listening socket stays with systemd); its own socket (tests): it stays
+    let activated = std::env::var("LISTEN_FDS").as_deref() == Ok("1");
+    let idle_exit_ms: i32 = a.val("--idle-exit-ms").and_then(|v| v.parse().ok()).unwrap_or(if activated { 60_000 } else { -1 });
     while !stopped() {
         let fds = vec![lfd, client.unwrap_or(-1), sig_rd];
-        // M4: no timer (the self-pipe ends poll on a signal; the client's hang-up is an event)
-        let r = poll_in(&fds, -1);
+        // M4: no timer while a client is connected or the helper owns its socket (the self-pipe ends poll on a
+        // signal; the client's hang-up is an event); one timeout to leave when idle
+        let timeout = if client.is_none() { idle_exit_ms } else { -1 };
+        let r = poll_in(&fds, timeout);
         if r[2] {
             drain(sig_rd);
+        }
+        if timeout >= 0 && client.is_none() && !r.iter().any(|x| *x) && !stopped() {
+            println!("HIDHELPER idle {} ms without a client: exit (socket activation brings it back)", timeout);
+            break;
         }
         if r[0] {
             if let Some(c) = ipc::accept(lfd) {
@@ -116,11 +126,14 @@ pub fn run(a: &crate::debug::Args) -> i32 {
             }
         }
     }
-    h.teardown(&stop_reason());
+    h.teardown(&if stopped() { stop_reason() } else { "idle exit".into() });
     if let Some(c) = client {
         ipc::close(c);
     }
-    let _ = std::fs::remove_file(&sock);
+    // the socket path belongs to systemd when it was handed over (removing it would break the next activation)
+    if !activated {
+        let _ = std::fs::remove_file(&sock);
+    }
     println!("HIDHELPER exit");
     0
 }
