@@ -4,7 +4,7 @@
 use dexhid_core::geom::Geometry;
 use dexhid_core::router::UiModel;
 use dexhid_core::state::{Choice, UiKind};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 
@@ -58,6 +58,44 @@ pub enum Cmd {
     Act(String, SyncSender<Result<String, String>>),
     /// D-Bus HidStatus -> JSON
     HidStatus(SyncSender<String>),
+    // M4
+    /// D-Bus Status -> JSON (built on request: no status work per input event)
+    Status(SyncSender<String>),
+    /// D-Bus OpenWindow(page) / OpenSettings, `dexhid toggle` with nothing to toggle
+    OpenWindow(String),
+    /// the app window was closed by the user / compositor
+    WindowClosed,
+    /// D-Bus CloseWindow / `dexhid window --close`
+    CloseWindow,
+    /// D-Bus SetMode / the window's mode switch -> reply (Err = the hint)
+    SetMode(String, Option<SyncSender<Result<String, String>>>),
+    /// the window: step a setting (key, +1 / -1)
+    WinSetting(String, i32),
+}
+
+/// M4: the per-touch part of the UI model (pressed keys / button / quick action, touch dots), handed to the UI
+/// without cloning the whole model; `clone_from` reuses the vectors' capacity (no allocation in steady state)
+#[derive(Clone, Debug, Default)]
+pub struct DynState {
+    pub lit_keys: Vec<usize>,
+    pub lit_button: Option<dexhid_core::router::Btn>,
+    pub lit_quick: Option<usize>,
+    pub dots: Vec<(f32, f32)>,
+}
+
+impl DynState {
+    pub fn copy_from_model(&mut self, m: &UiModel) {
+        self.lit_keys.clone_from(&m.lit_keys);
+        self.lit_button = m.lit_button;
+        self.lit_quick = m.lit_quick;
+        self.dots.clone_from(&m.dots);
+    }
+    pub fn copy_into_model(&self, m: &mut UiModel) {
+        m.lit_keys.clone_from(&self.lit_keys);
+        m.lit_button = self.lit_button;
+        m.lit_quick = self.lit_quick;
+        m.dots.clone_from(&self.dots);
+    }
 }
 
 /// UI-side configuration (fixed at start)
@@ -83,8 +121,6 @@ pub struct Shared {
     pub ui_ver: AtomicU64,
     /// last UI loop iteration (CLOCK_MONOTONIC ms), for the watchdog
     pub ui_heartbeat: AtomicI64,
-    /// JSON status for `dexhid status`
-    pub status: Mutex<String>,
     pub layout_names: Mutex<Vec<String>>,
     pub debug: bool,
     pub ui_cfg: UiCfg,
@@ -99,6 +135,19 @@ pub struct Shared {
     pub legend_layout: Mutex<Option<String>>,
     /// the legends the UI shows now (code -> levels), for typing text / the word tracker in the daemon
     pub labels: Mutex<std::collections::HashMap<u16, [String; 4]>>,
+    // M4
+    /// the dynamic part of the model; `dyn_ver` bumps on every change
+    pub dyn_ui: Mutex<DynState>,
+    pub dyn_ver: AtomicU64,
+    /// the app window's content (None = closed); `win_ver` bumps on every change
+    pub win: Mutex<Option<crate::appwin::WinView>>,
+    pub win_ver: AtomicU64,
+    /// open the window at this page ("home", "settings", a module id)
+    pub win_req: Mutex<Option<String>>,
+    /// the daemon wants a UI heartbeat (watchdog ping without a UI timer)
+    pub hb_req: AtomicBool,
+    /// render at half resolution (setting render_scale)
+    pub half_res: AtomicBool,
 }
 
 impl Shared {
@@ -106,9 +155,22 @@ impl Shared {
         let _ = self.tx.send(c);
         crate::sys::poke(self.wake_core);
     }
+    /// a static change (layout, labels, modes, info text ...): the whole model
     pub fn publish_ui(&self, kind: UiKind, model: &UiModel, epoch: u64) {
+        self.dyn_ui.lock().unwrap().copy_from_model(model);
         *self.ui.lock().unwrap() = (kind, model.clone(), epoch);
         self.ui_ver.fetch_add(1, Ordering::SeqCst);
+        crate::sys::poke(self.wake_ui);
+    }
+    /// a per-touch change: only the dynamic part (no model clone, no allocation in steady state)
+    pub fn publish_dyn(&self, model: &UiModel) {
+        self.dyn_ui.lock().unwrap().copy_from_model(model);
+        self.dyn_ver.fetch_add(1, Ordering::SeqCst);
+        crate::sys::poke(self.wake_ui);
+    }
+    pub fn publish_win(&self, v: Option<crate::appwin::WinView>) {
+        *self.win.lock().unwrap() = v;
+        self.win_ver.fetch_add(1, Ordering::SeqCst);
         crate::sys::poke(self.wake_ui);
     }
 }

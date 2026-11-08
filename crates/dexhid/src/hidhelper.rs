@@ -46,6 +46,8 @@ fn seat_uid() -> Option<u32> {
 
 pub fn run(a: &crate::debug::Args) -> i32 {
     install_signals();
+    let (sig_rd, sig_wr) = wake_pipe();
+    WAKE_FD.store(sig_wr, std::sync::atomic::Ordering::SeqCst);
     let sock = arg(a, "--socket", "/run/dexhid/hid.sock");
     let mut h = H {
         root: PathBuf::from(arg(a, "--configfs", "/sys/kernel/config/usb_gadget")),
@@ -72,8 +74,12 @@ pub fn run(a: &crate::debug::Args) -> i32 {
     }
     let mut client: Option<i32> = None;
     while !stopped() {
-        let fds = vec![lfd, client.unwrap_or(-1)];
-        let r = poll_in(&fds, 1000);
+        let fds = vec![lfd, client.unwrap_or(-1), sig_rd];
+        // M4: no timer (the self-pipe ends poll on a signal; the client's hang-up is an event)
+        let r = poll_in(&fds, -1);
+        if r[2] {
+            drain(sig_rd);
+        }
         if r[0] {
             if let Some(c) = ipc::accept(lfd) {
                 let p = ipc::peer(c);

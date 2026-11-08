@@ -117,6 +117,9 @@ pub const DEFS: &[Def] = &[
     Def { key: "haptic_feedback", module: "feedback", title: "Vibrate on key press", kind: Kind::Bool },
     // M3 modules
     Def { key: "target", module: "general", title: "Keys + pointer go to", kind: Kind::Choice(&["desktop", "usb"]) },
+    // M4
+    Def { key: "mode_select", module: "general", title: "Mode (USB / touchpad for the monitor / second screen)", kind: Kind::Choice(crate::modes::NAMES) },
+    Def { key: "render_scale", module: "look", title: "Render resolution (half = less memory)", kind: Kind::Choice(&["full", "half"]) },
     Def { key: "features.gestures.enabled", module: "gestures", title: "Gesture shortcuts (3 / 4 fingers)", kind: Kind::Bool },
     Def { key: "features.gestures.options.swipe3_left", module: "gestures", title: "3 fingers left", kind: Kind::Choice(G) },
     Def { key: "features.gestures.options.swipe3_right", module: "gestures", title: "3 fingers right", kind: Kind::Choice(G) },

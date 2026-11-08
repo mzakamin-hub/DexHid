@@ -53,6 +53,11 @@ pub struct Config {
     /// show the small "Use as pad" pill while the monitor is used as a display
     pub display_pill: bool,
     pub strip_mm: f32,
+    /// M4: the app window's mode switch, the user's last choice: "usb" | "pad" | "screen" (applied through the
+    /// target / state machine, see dexhid_core::modes)
+    pub mode_select: String,
+    /// M4: "full" | "half" (half-resolution buffers scaled up by the compositor: a quarter of the memory)
+    pub render_scale: String,
     pub key_gap_mm: f32,
     /// xkb layout group used for the legends (the active group is not visible to an unfocused client)
     pub xkb_layout_index: u32,
@@ -248,6 +253,8 @@ impl Default for Config {
             palm_major: 0,
             display_pill: true,
             strip_mm: 11.0,
+            mode_select: "pad".into(),
+            render_scale: "full".into(),
             key_gap_mm: 1.2,
             xkb_layout_index: 0,
             theme: "desktop".into(),

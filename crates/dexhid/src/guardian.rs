@@ -252,6 +252,9 @@ impl G {
 /// `dexhid guardian --fd 3 --hb-ms 3000`
 pub fn run(fd: i32, hb_ms: i64) -> i32 {
     install_signals();
+    // M4: a self-pipe so a signal always ends the (untimed) poll
+    let (sig_rd, sig_wr) = wake_pipe();
+    WAKE_FD.store(sig_wr, std::sync::atomic::Ordering::SeqCst);
     let fake = std::env::var("DEXHID_GUARDIAN_FAKE").is_ok();
     println!("GUARDIAN start pid={} hb_ms={}{}", std::process::id(), hb_ms, if fake { " (fake keyboard)" } else { "" });
     let mut g = G { dev: None, held: BTreeSet::new(), leds: (false, false) };
@@ -266,7 +269,13 @@ pub fn run(fd: i32, hb_ms: i64) -> i32 {
             Some(Sink::Real(k)) => k.u.fd,
             _ => -1,
         };
-        let r = poll_in(&[fd, ufd], 200);
+        // M4: no timer while no key is held (the daemon's death is a hang-up on the socket, a signal ends poll);
+        // with keys held: wake when the heartbeat would be overdue
+        let timeout = if hb_ms > 0 && !hb_fired && !g.held.is_empty() { (hb_ms - (mono_ms() - last)).clamp(0, hb_ms) as i32 + 1 } else { -1 };
+        let r = poll_in(&[fd, ufd, sig_rd], timeout);
+        if r[2] {
+            drain(sig_rd);
+        }
         let now = mono_ms();
         if r[0] {
             loop {

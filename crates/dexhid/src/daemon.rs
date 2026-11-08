@@ -38,6 +38,9 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
+/// M4: the watchdog timeout while nothing is grabbed / held (one ping every 5 minutes instead of every 2.5 s)
+const IDLE_WATCHDOG_MS: i64 = 600_000;
+
 #[derive(Default, Debug)]
 pub struct Opts {
     pub config: Option<PathBuf>,
@@ -136,7 +139,18 @@ struct D {
     notify: Notify,
     last_ping: i64,
     last_state: String,
-    status: String,
+    // M4
+    /// the cheap state tuple the STATE line is printed for (no status work per input event)
+    state_key: Option<(Desired, bool, bool, UiKind, UiKind, bool)>,
+    /// the app window is open; its last published view
+    win_open: bool,
+    win_last: Option<crate::appwin::WinView>,
+    /// the watchdog timeout in effect (short while devices / a grab are held, long while idle)
+    wd_active: Option<bool>,
+    /// a mode switch is running (mode_select is stored by it, not re-dispatched)
+    in_mode: bool,
+    /// when the UI was asked for a heartbeat (watchdog ping pending)
+    hb_asked: Option<i64>,
     dbus_conn: Option<zbus::blocking::Connection>,
     wait_logged: bool,
     quit: Option<i32>,
@@ -239,7 +253,6 @@ pub fn run(opts: Opts) -> i32 {
         ui: std::sync::Mutex::new((UiKind::None, Default::default(), 0)),
         ui_ver: Default::default(),
         ui_heartbeat: std::sync::atomic::AtomicI64::new(mono_ms()),
-        status: std::sync::Mutex::new("{}".into()),
         layout_names: std::sync::Mutex::new(layouts.iter().map(|l| l.name.clone()).collect()),
         debug: opts.debug,
         ui_cfg: UiCfg {
@@ -255,6 +268,13 @@ pub fn run(opts: Opts) -> i32 {
         mirror_gen: Default::default(),
         legend_layout: std::sync::Mutex::new(None),
         labels: std::sync::Mutex::new(Default::default()),
+        dyn_ui: std::sync::Mutex::new(Default::default()),
+        dyn_ver: Default::default(),
+        win: std::sync::Mutex::new(None),
+        win_ver: Default::default(),
+        win_req: std::sync::Mutex::new(None),
+        hb_req: Default::default(),
+        half_res: std::sync::atomic::AtomicBool::new(cfg.render_scale == "half"),
     });
     let dbus_conn = match dbus::serve(sh.clone()) {
         Ok(c) => {
@@ -385,7 +405,12 @@ pub fn run(opts: Opts) -> i32 {
         notify,
         last_ping: 0,
         last_state: String::new(),
-        status: String::new(),
+        state_key: None,
+        win_open: false,
+        win_last: None,
+        wd_active: None,
+        in_mode: false,
+        hb_asked: None,
         dbus_conn,
         wait_logged: false,
         quit: None,
@@ -550,6 +575,18 @@ impl D {
 
     /// change one setting (sheet step or D-Bus); returns the new display value
     fn set_setting(&mut self, key: &str, value: Option<&str>, dir: i32) -> Result<String, String> {
+        // M4: the mode is a switch, not a stored value: `dexhid set mode_select X` / a sheet tap switch modes
+        if key == "mode_select" && !self.in_mode {
+            let next = match value {
+                Some(v) => v.to_string(),
+                None => {
+                    let i = dexhid_core::modes::Mode::parse(&self.cfg.mode_select).map(|m| m.index()).unwrap_or(1);
+                    let step = if dir < 0 { -1 } else { 1 };
+                    dexhid_core::modes::NAMES[(i as i32 + step).rem_euclid(3) as usize].to_string()
+                }
+            };
+            return self.set_mode(&next);
+        }
         let mut t = self.settings.clone();
         let cur = self.cfg_value();
         let shown: String;
@@ -637,6 +674,10 @@ impl D {
         if !self.cfg.status_info {
             let o = self.router.set_info("");
             self.apply(o);
+        }
+        // M4: render resolution (the UI recreates its buffers)
+        if self.sh.half_res.swap(self.cfg.render_scale == "half", Ordering::SeqCst) != (self.cfg.render_scale == "half") {
+            poke(self.sh.wake_ui);
         }
         self.info_next = 0;
         let sheet = self.build_sheet();
@@ -847,7 +888,35 @@ impl D {
             println!("CMD-RX t={} {:?}", mono_ms(), c);
         }
         match c {
+            // M4: nothing to toggle (no monitor, USB target off): the window's Home instead of nothing
+            Cmd::Toggle(_) if !self.machine.connected && self.m3.target == "desktop" => self.open_window("home"),
             Cmd::Toggle(s) => self.handle(Ev::Toggle, &format!("toggle:{}", s)),
+            Cmd::Status(reply) => {
+                let _ = reply.send(self.status_json());
+            }
+            Cmd::OpenWindow(p) => self.open_window(&p),
+            Cmd::WindowClosed | Cmd::CloseWindow => {
+                println!("WINDOW-CLOSED t={}", mono_ms());
+                self.win_open = false;
+                self.win_last = None;
+                self.sh.publish_win(None);
+            }
+            Cmd::SetMode(m, reply) => {
+                let r = self.set_mode(&m);
+                if reply.is_none() {
+                    if let Err(e) = &r {
+                        println!("MODE-REJECTED mode={} ({})", m, e);
+                    }
+                }
+                if let Some(rp) = reply {
+                    let _ = rp.send(r);
+                }
+            }
+            Cmd::WinSetting(k, dir) => {
+                if let Err(e) = self.set_setting(&k, None, dir) {
+                    println!("SETTING-REJECTED key={} ({})", k, e);
+                }
+            }
             Cmd::Release(s) => self.handle(Ev::Release, &format!("release:{}", s)),
             Cmd::Resume(s) => self.handle(Ev::Resume, &format!("resume:{}", s)),
             Cmd::SetLayout(n) => self.set_layout(&n),
@@ -1292,7 +1361,7 @@ impl D {
             self.release();
         }
         let model_ver = self.router.model().version;
-        if self.published.0 != e.ui || self.model_dirty {
+        if self.published.0 != e.ui || (self.model_dirty && model_ver != self.published.1) {
             if self.published.0 != e.ui {
                 self.mapped = UiKind::None;
                 self.ui_epoch += 1;
@@ -1303,7 +1372,155 @@ impl D {
             self.published = (e.ui, model_ver);
             self.model_dirty = false;
             self.sh.publish_ui(e.ui, self.router.model(), self.ui_epoch);
+        } else if self.model_dirty {
+            // M4: a touch change (pressed keys / button, dots): only the dynamic part, no model clone
+            self.model_dirty = false;
+            self.sh.publish_dyn(self.router.model());
         }
+        self.publish_window();
+    }
+
+    // ---------------------------------------------------------------- M4: the app window + the mode switch
+
+    fn effective_mode(&self) -> dexhid_core::modes::Mode {
+        dexhid_core::modes::effective(self.m3.target == "usb", self.machine.desired)
+    }
+
+    /// USB state for the window: (live line, hint "host" | "none" | "")
+    fn usb_state(&self) -> (String, String) {
+        let pw = dexhid_core::gadget::power(std::path::Path::new("/sys/class/power_supply"), std::path::Path::new("/sys/class/typec"));
+        let roles = dexhid_core::gadget::roles(std::path::Path::new("/sys/class/usb_role"));
+        let (ok, rt) = dexhid_core::gadget::role_text(&roles);
+        let host = self.m3.sink.as_ref().map(|s| if s.connected() { "computer connected" } else { "waiting for a computer" }).unwrap_or("off");
+        let line = format!("USB {}  |  {}  |  {}", host, pw.line(), rt);
+        let connected = self.m3.sink.as_ref().is_some_and(|s| s.connected());
+        let hint = if !ok && !roles.is_empty() {
+            "host"
+        } else if !connected && pw.line().starts_with("no USB power") {
+            "none"
+        } else {
+            ""
+        };
+        (line, hint.into())
+    }
+
+    fn build_window(&self) -> crate::appwin::WinView {
+        use crate::appwin::{WinRow, WinView};
+        let mods = self.build_sheet();
+        let mode = self.effective_mode();
+        let monitor = self.machine.connected && !self.m3.hid_connected;
+        let monitor_name = self.real_conn.as_ref().map(|c| c.name.clone()).or(if self.sim { Some("simulated display".into()) } else { None }).unwrap_or_default();
+        let (usb_line, usb_hint) = self.usb_state();
+        let detail = match mode {
+            dexhid_core::modes::Mode::Usb => self.m3.sink.as_ref().map(|s| if s.connected() { "typing on the computer" } else { "waiting for a computer" }).unwrap_or("starting").to_string(),
+            dexhid_core::modes::Mode::Pad => format!("pad mode on {}", if monitor_name.is_empty() { "the monitor" } else { &monitor_name }),
+            dexhid_core::modes::Mode::Screen => if monitor { format!("{} extended, no prompt", monitor_name) } else { "released, no external display".into() },
+        };
+        WinView {
+            module_ids: mods.iter().map(|m| m.id.clone()).collect(),
+            modules: mods.iter().map(|m| m.title.clone()).collect(),
+            module_rows: mods.iter().map(|m| m.rows.iter().filter(|r| r.kind != Kind::Action).map(|r| WinRow { key: r.key.clone(), title: r.title.clone(), value: r.value.clone(), kind: Some(r.kind) }).collect()).collect(),
+            palette: crate::look::palette_of(self.router.model()),
+            mode: mode.name().into(),
+            mode_detail: detail,
+            monitor,
+            monitor_name,
+            usb_line,
+            usb_hint,
+            layouts: self.layouts.iter().filter(|l| l.name != "none").map(|l| (l.name.clone(), l.title.clone())).collect(),
+            layout: self.router.layout().name.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// publish the window's view when it changed (only while the window is open and not under the overlay)
+    fn publish_window(&mut self) {
+        if !self.win_open || self.grabbed {
+            return;
+        }
+        let v = self.build_window();
+        if self.win_last.as_ref() != Some(&v) {
+            self.win_last = Some(v.clone());
+            self.sh.publish_win(Some(v));
+        }
+    }
+
+    fn open_window(&mut self, page: &str) {
+        println!("WINDOW-OPEN t={} page={}", mono_ms(), page);
+        self.win_open = true;
+        self.win_last = None;
+        let v = self.build_window();
+        self.win_last = Some(v.clone());
+        *self.sh.win.lock().unwrap() = Some(v);
+        self.sh.win_ver.fetch_add(1, Ordering::SeqCst);
+        *self.sh.win_req.lock().unwrap() = Some(page.to_string());
+        poke(self.sh.wake_ui);
+    }
+
+    /// lift every key, button and pad contact on every sink, without ungrabbing (a mode switch's first step)
+    fn release_input(&mut self) {
+        let o = self.router.reset_contacts();
+        let outs: Vec<Out> = o.into_iter().filter(|x| matches!(x, Out::Key(..) | Out::Pad(..))).collect();
+        self.apply(outs);
+        if let Some((dev, m)) = self.mouse.as_mut() {
+            let o = m.release_all();
+            dev.apply(&o);
+            dev.release_all();
+        }
+        let n = self.kb_release_all() + self.m3.sink.as_mut().map(|s| s.release_all()).unwrap_or(0);
+        println!("MODE-RELEASE t={} extra_keys={}", mono_ms(), n);
+    }
+
+    /// the window's / D-Bus mode switch: release first, then the target / state machine steps, published once
+    fn set_mode(&mut self, name: &str) -> Result<String, String> {
+        use dexhid_core::modes::{plan, Ctx, Mode, Step};
+        let m = Mode::parse(name).ok_or_else(|| format!("unknown mode {:?} (usb | pad | screen)", name))?;
+        let ctx = Ctx { monitor: self.machine.connected && !self.m3.hid_connected, usb_enabled: self.cfg.features.usbhid.enabled, target_usb: self.m3.target == "usb" || self.cfg.target == "usb" };
+        let steps = match plan(m, &ctx) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("MODE t={} {} refused: {}", mono_ms(), m.name(), e);
+                return Err(e);
+            }
+        };
+        println!("MODE t={} {} steps={:?}", mono_ms(), m.name(), steps);
+        self.in_mode = true;
+        let mut res = Ok(m.name().to_string());
+        for s in steps {
+            match s {
+                Step::ReleaseAll => self.release_input(),
+                Step::Set(k, v) => {
+                    if let Err(e) = self.set_setting(k, Some(v), 0) {
+                        res = Err(format!("{} = {}: {}", k, v, e));
+                        break;
+                    }
+                }
+                Step::Machine(ev) => self.handle(ev, &format!("mode:{}", m.name())),
+            }
+        }
+        self.in_mode = false;
+        if m == Mode::Usb && self.m3.target != "usb" {
+            res = Err(self.m3.sink_note.clone());
+        }
+        res
+    }
+
+    /// the watchdog: a short timeout while a grab / devices / a HID target exist (a hang there matters), a long one
+    /// while idle (no periodic wake-ups); systemd takes the new value from WATCHDOG_USEC=
+    fn watchdog_period(&mut self) -> Option<i64> {
+        let w = self.notify.watchdog_ms?;
+        let active = self.grabbed || self.touch.is_some() || self.kbd_on || self.pad.is_some() || self.m3.sink.is_some();
+        if self.wd_active != Some(active) {
+            self.wd_active = Some(active);
+            let ms = if active { w } else { w.max(IDLE_WATCHDOG_MS) };
+            self.notify.send(&format!("WATCHDOG_USEC={}", ms * 1000));
+            self.notify.send("WATCHDOG=1");
+            self.last_ping = mono_ms();
+            if self.opts.debug {
+                println!("WATCHDOG t={} timeout_ms={} ({})", mono_ms(), ms, if active { "active" } else { "idle" });
+            }
+        }
+        Some(if active { (w / 2).max(100) } else { w.max(IDLE_WATCHDOG_MS) / 2 })
     }
 
     fn print_geom(&self) {
@@ -1315,8 +1532,15 @@ impl D {
         println!("GEOM-END v={}", v);
     }
 
+    /// the STATE line + StateChanged signal when the state changes (a cheap tuple compare per loop; the JSON status
+    /// is built only when asked for)
     fn update_status(&mut self) {
         let e = self.machine.effective();
+        let key = (self.machine.desired, e.grab, self.grabbed, e.ui, self.mapped, self.machine.paused());
+        if self.state_key == Some(key) {
+            return;
+        }
+        self.state_key = Some(key);
         let st = format!(
             "desired={} grab={} grabbed={} ui={} mapped={} paused={:?}",
             self.machine.desired.name(),
@@ -1334,6 +1558,11 @@ impl D {
             }
             self.notify.send(&format!("STATUS={}", self.machine.desired.name()));
         }
+    }
+
+    /// `dexhid status` / D-Bus Status
+    fn status_json(&self) -> String {
+        let e = self.machine.effective();
         let o = self.router.orientation().map(|o| o.name()).unwrap_or("unknown");
         let s = serde_json::json!({
             "state": self.machine.desired.name(),
@@ -1376,12 +1605,25 @@ impl D {
         let mut s = s;
         if let Some(m) = s.as_object_mut() {
             self.m3_status(m);
+            // M4
+            let eff = self.effective_mode();
+            m.insert("mode_select".into(), serde_json::json!(self.cfg.mode_select));
+            m.insert("mode_effective".into(), serde_json::json!(eff.name()));
+            let hint = if eff.name() != self.cfg.mode_select {
+                match self.cfg.mode_select.as_str() {
+                    "pad" if !self.machine.connected => dexhid_core::modes::NO_MONITOR.to_string(),
+                    "pad" => "pad mode left (Exit, 5-finger hold, lock or release)".into(),
+                    "usb" => format!("USB mode not active: {}", if self.m3.sink_note.is_empty() { "target off" } else { &self.m3.sink_note }),
+                    _ => "a toggle / resume / plug changed it".into(),
+                }
+            } else {
+                String::new()
+            };
+            m.insert("mode_hint".into(), serde_json::json!(hint));
+            m.insert("window_open".into(), serde_json::json!(self.win_open));
+            m.insert("render_scale".into(), serde_json::json!(self.cfg.render_scale));
         }
-        let s = s.to_string();
-        if s != self.status {
-            self.status = s.clone();
-            *self.sh.status.lock().unwrap() = s;
-        }
+        s.to_string()
     }
 
     fn run_loop(&mut self) -> i32 {
@@ -1432,10 +1674,14 @@ impl D {
             if let Some(x) = self.chord.deadline() {
                 dl.push(x);
             }
-            if let Some(w) = self.notify.watchdog_ms {
-                dl.push(self.last_ping + (w / 2).max(100));
+            // M4: the watchdog ping (long period while idle) and the guardian heartbeat only while keys are held
+            if let Some(p) = self.watchdog_period() {
+                dl.push(match self.hb_asked {
+                    Some(t) => t + 2000,
+                    None => self.last_ping + p,
+                });
             }
-            if let Some(g) = &self.guard {
+            if let Some(g) = self.guard.as_ref().filter(|g| !g.held.is_empty()) {
                 dl.push(g.last_ping + 1000);
             }
             if self.machine.effective().grab && !self.grabbed {
@@ -1571,7 +1817,9 @@ impl D {
                 }
             }
             if let Some(g) = self.guard.as_mut() {
-                if now - g.last_ping >= 1000 {
+                // the guardian only needs a heartbeat while it holds keys (its own timeout runs only then);
+                // its death shows as a hang-up on the socket at any time
+                if !g.held.is_empty() && now - g.last_ping >= 1000 {
                     g.ping();
                     if !g.alive() {
                         self.guardian_lost();
@@ -1600,17 +1848,34 @@ impl D {
             }
             self.reconcile();
             self.update_status();
-            if let Some(w) = self.notify.watchdog_ms {
-                if now - self.last_ping >= (w / 2).max(100) {
-                    let ui_age = now - self.sh.ui_heartbeat.load(Ordering::SeqCst);
-                    if ui_age < 2000 {
-                        self.notify.send("WATCHDOG=1");
-                        self.last_ping = now;
-                    } else {
-                        self.last_ping = now - (w / 2).max(100) + 250;
-                        if self.opts.debug {
-                            println!("WARN UI heartbeat {} ms old: no watchdog ping", ui_age);
+            if let Some(p) = self.watchdog_period() {
+                if now - self.last_ping >= p {
+                    // the UI thread sleeps without a timer: ask it for a heartbeat and ping once it answered (it
+                    // pokes us back at once); a UI that does not answer within 2 s gets no ping (systemd restarts)
+                    let hb = self.sh.ui_heartbeat.load(Ordering::SeqCst);
+                    match self.hb_asked {
+                        None if now - hb < 300 => {
+                            self.notify.send("WATCHDOG=1");
+                            self.last_ping = now;
                         }
+                        None => {
+                            self.hb_asked = Some(now);
+                            self.sh.hb_req.store(true, Ordering::SeqCst);
+                            poke(self.sh.wake_ui);
+                        }
+                        Some(t) if hb >= t => {
+                            self.notify.send("WATCHDOG=1");
+                            self.last_ping = now;
+                            self.hb_asked = None;
+                        }
+                        Some(t) if now - t >= 2000 => {
+                            self.hb_asked = None;
+                            self.last_ping = now - p + 1000;
+                            if self.opts.debug {
+                                println!("WARN UI heartbeat {} ms old: no watchdog ping", now - hb);
+                            }
+                        }
+                        Some(_) => {}
                     }
                 }
             }

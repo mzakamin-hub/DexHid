@@ -142,6 +142,25 @@ impl Roles {
     }
 }
 
+/// the palette of a model's theme ("desktop" = the KDE colours when known, else the built-in dark / light / amoled)
+pub fn palette_of(m: &UiModel) -> Palette {
+    let (t, a, k) = &m.theme;
+    if t == "desktop" {
+        if let Some(d) = &m.desk {
+            return dexhid_core::feedback::palette_desk(d, if *k == 0 { 100 } else { *k });
+        }
+    }
+    dexhid_core::feedback::palette(if t.is_empty() || t == "desktop" { "dark" } else { t }, a, if *k == 0 { 100 } else { *k })
+}
+
+/// corner radius scale: the desktop's corners for theme "desktop" (Breeze-like 1.3 mm otherwise)
+pub fn corner_of(m: &UiModel) -> f32 {
+    match (&m.desk, m.theme.0.as_str()) {
+        (Some(d), "desktop") => (d.radius_mm / 1.3).clamp(0.0, 3.0),
+        _ => 1.0,
+    }
+}
+
 // ------------------------------------------------------------------ icons
 
 /// a primitive in unit coordinates (-1..1, y down), widths in units
@@ -542,6 +561,9 @@ pub enum Tone {
 
 #[allow(clippy::too_many_arguments)]
 pub fn button(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, r: &Rect, label: &str, ic: Option<Icon>, tone: Tone, pressed: bool) {
+    if !cv.visible(r) {
+        return;
+    }
     let rad = t.r_md.min(r.h / 2.0);
     let (bg, fg) = match (tone, pressed) {
         (_, true) => (c.accent, c.on_accent),
@@ -597,15 +619,36 @@ pub fn switch(cv: &mut Canvas, t: &Tokens, c: &Roles, r: &Rect, on: bool) {
 
 // ------------------------------------------------------------------ overlay
 
-fn draw_key(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, m: &UiModel, k: &PlacedKey, lit: bool, labels: Option<&crate::xkb::Labels>) {
-    let sym = matches!(k.kind, KeyKind::Code(code) if keycodes::is_symbol_key(code) || code == 57) || matches!(k.kind, KeyKind::Combo(_));
-    let on = match &k.kind {
+/// toggled: latched sticky modifier, Caps / Num Lock on, Fn layer, select mode, laser
+fn key_on(m: &UiModel, k: &PlacedKey) -> bool {
+    match &k.kind {
         KeyKind::Code(code) => m.latched.iter().any(|(l, _)| l == code) || (*code == 58 && m.leds.0) || (*code == 69 && m.leds.1),
         KeyKind::Action(Action::Fn) => m.fn_on,
         KeyKind::Action(Action::SelectMode) => m.select,
         KeyKind::Action(Action::Laser) => m.laser,
         _ => false,
-    };
+    }
+}
+
+fn key_locked(m: &UiModel, k: &PlacedKey) -> bool {
+    matches!(&k.kind, KeyKind::Code(code) if m.latched.iter().any(|(l, lk)| l == code && *lk)) || matches!(&k.kind, KeyKind::Code(58 | 69))
+}
+
+fn long_label(k: &PlacedKey, labels: Option<&crate::xkb::Labels>) -> String {
+    match &k.long {
+        Some(KeyKind::Code(cd)) => code_label(*cd, false, labels),
+        Some(KeyKind::Combo(v)) => code_label(*v.last().unwrap_or(&0), true, labels),
+        _ => String::new(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_key(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, m: &UiModel, k: &PlacedKey, lit: bool, labels: Option<&crate::xkb::Labels>) {
+    if !cv.visible(&k.rect) {
+        return;
+    }
+    let sym = matches!(k.kind, KeyKind::Code(code) if keycodes::is_symbol_key(code) || code == 57) || matches!(k.kind, KeyKind::Combo(_));
+    let on = key_on(m, k);
     let rad = t.r_md.min(k.rect.h * 0.25);
     let lip = t.lip.min(k.rect.h * 0.08);
     let body = Rect::new(k.rect.x, k.rect.y, k.rect.w, (k.rect.h - lip).max(1.0));
@@ -630,8 +673,7 @@ fn draw_key(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, m: &UiModel, 
     }
     let b = if lit { Rect::new(body.x, body.y + lip, body.w, body.h) } else { body };
     if on && !lit {
-        let locked = matches!(&k.kind, KeyKind::Code(code) if m.latched.iter().any(|(l, lk)| l == code && *lk)) || matches!(&k.kind, KeyKind::Code(58 | 69));
-        if locked {
+        if key_locked(m, k) {
             cv.disc(b.right() - t.s2 - t.ppm * 0.3, b.y + t.s2 + t.ppm * 0.3, t.ppm * 0.7, c.accent);
         }
     }
@@ -646,12 +688,8 @@ fn draw_key(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, m: &UiModel, 
     let size = if n <= 1 { (b.h * 0.40).min(t.ppm * 5.4) } else { (b.h * 0.27).min(t.t_label) };
     let fg = if sym || lit || on { fg } else { c.text_dim };
     f.text(cv, &inner, &l, size, fg, Align::Center, 0.7);
-    if let Some(alt) = &k.long {
-        let al = match alt {
-            KeyKind::Code(cd) => code_label(*cd, false, labels),
-            KeyKind::Combo(v) => code_label(*v.last().unwrap_or(&0), true, labels),
-            _ => String::new(),
-        };
+    if k.long.is_some() {
+        let al = long_label(k, labels);
         let r = Rect::new(b.right() - b.w * 0.42, b.y + t.ppm * 0.3, b.w * 0.38, b.h * 0.32);
         f.text(cv, &r, &al, t.t_caption.min(b.h * 0.24), if lit { c.on_accent } else { c.text_dim }, Align::Right, 0.7);
     }
@@ -699,11 +737,25 @@ fn info_chips(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, area: &Rect
     x
 }
 
-pub fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, p: &Palette, corner: f32, labels: Option<&crate::xkb::Labels>) {
+/// the mirror preview frame (w, h, 0xffRRGGBB pixels)
+pub type MirrorFrame = (u32, u32, Vec<u32>);
+
+/// The whole overlay (static parts, pressed / toggled states, touch dots, the mirror preview), painted inside the
+/// canvas clip: a full frame draws it once with no clip, a partial frame once per damaged rect (every element
+/// outside the clip is culled before any text or shape work).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_scene(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, p: &Palette, corner: f32, labels: Option<&crate::xkb::Labels>, mirror: Option<&MirrorFrame>) {
     let t = Tokens::new(m.px_per_mm, corner);
     let c = Roles::from(p);
-    cv.clear(c.bg);
-    // strip
+    cv.clear(c.bg | 0xff00_0000);
+    if cv.visible(&m.strip) {
+        strip(cv, f, &t, &c, m);
+    }
+    scene_body(cv, f, &t, &c, m, labels, mirror);
+}
+
+fn strip(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, m: &UiModel) {
+    let (t, c) = (*t, *c);
     cv.fill(&m.strip, c.surface);
     cv.bar(&Rect::new(m.strip.x, m.strip.bottom() - t.hair, m.strip.w, t.hair), c.hairline);
     let first_btn = m.buttons.iter().filter(|b| m.strip.contains(b.rect.x, b.rect.y)).map(|b| b.rect.x).fold(m.strip.right(), f32::min);
@@ -722,9 +774,14 @@ pub fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, p: &Palette, cor
     if hr.w > t.ppm * 20.0 {
         f.text(cv, &hr, line, t.t_caption, col, Align::Left, 1.0);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scene_body(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, m: &UiModel, labels: Option<&crate::xkb::Labels>, mirror: Option<&MirrorFrame>) {
+    let (t, c) = (*t, *c);
     // areas
     for r in &m.regions {
-        if r.id == dexhid_core::arrangement::TOUCHPAD {
+        if r.id == dexhid_core::arrangement::TOUCHPAD && cv.visible(&r.rect) {
             cv.rrect(&r.rect, t.r_lg, c.surface);
             cv.rrect_ring(&r.rect, t.r_lg, t.hair, c.hairline);
         }
@@ -739,12 +796,18 @@ pub fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, p: &Palette, cor
         }
     }
     for b in &m.bands {
+        if !cv.visible(&b.rect) {
+            continue;
+        }
         cv.fill(&b.rect, c.surface);
         cv.bar(&Rect::new(b.rect.x, b.rect.bottom() - t.hair, b.rect.w, t.hair), c.hairline);
         if b.chips.is_empty() && !b.empty.is_empty() {
             f.text(cv, &Rect::new(b.rect.x + t.s4, b.rect.y, b.rect.w - t.s8, b.rect.h), &b.empty, t.t_caption, c.text_dim, Align::Left, 1.0);
         }
         for (l, r) in &b.chips {
+            if !cv.visible(r) {
+                continue;
+            }
             let r = r.inset(t.ppm * 0.3);
             cv.rrect(&r, r.h / 2.0, c.raised);
             cv.rrect_ring(&r, r.h / 2.0, t.hair, c.hairline);
@@ -774,11 +837,27 @@ pub fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, p: &Palette, cor
         f.text(cv, l, "Left click", t.t_caption, alpha(c.text_dim, 0xb0), Align::Center, 0.8);
         f.text(cv, r, "Right click", t.t_caption, alpha(c.text_dim, 0xb0), Align::Center, 0.8);
     }
-    for q in &m.quick {
-        quick_button(cv, f, &t, &c, q, false);
+    for (i, q) in m.quick.iter().enumerate() {
+        quick_button(cv, f, &t, &c, q, m.lit_quick == Some(i));
     }
-    for k in &m.keys {
-        draw_key(cv, f, &t, &c, m, k, false, labels);
+    for (i, k) in m.keys.iter().enumerate() {
+        draw_key(cv, f, &t, &c, m, k, m.lit_keys.contains(&i), labels);
+    }
+    if let Some(r) = m.mirror {
+        if cv.visible(&r) {
+            match mirror {
+                Some((w, h, px)) if *w > 0 && *h > 0 => {
+                    cv.blit(&r, *w, *h, px);
+                    cv.rrect_ring(&r, t.r_sm, t.hair, c.outline);
+                }
+                _ => {
+                    cv.rrect(&r, t.r_md, c.raised | 0xff00_0000);
+                    let ib = Rect::new(r.x, r.y + r.h / 2.0 - t.icon * 1.6, r.w, t.icon * 1.4);
+                    icon(cv, &ib, Icon::Display, t.icon * 1.2, c.text_dim);
+                    f.text(cv, &Rect::new(r.x + t.s2, r.y + r.h / 2.0, r.w - t.s4, t.t_caption * 1.6), "Mirror preview: waiting for the screen", t.t_caption, c.text_dim, Align::Center, 0.7);
+                }
+            }
+        }
     }
     if m.edit {
         for r in &m.regions {
@@ -818,12 +897,124 @@ pub fn draw_static(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, p: &Palette, cor
         if matches!(b.btn, Btn::SheetTab(_) | Btn::SheetRow(_) | Btn::SheetMinus(_) | Btn::SheetPlus(_) | Btn::SheetUp(_)) {
             continue; // drawn by the sheet
         }
-        strip_button(cv, f, &t, &c, m, b, false);
+        strip_button(cv, f, &t, &c, m, b, m.lit_button == Some(b.btn));
     }
+    // touch dots on top
+    let r = dot_radius(&t);
+    for &(x, y) in &m.dots {
+        cv.disc(x, y, r, alpha(c.accent, 0x50));
+        cv.disc(x, y, r * 0.45, alpha(c.accent, 0xd0));
+    }
+}
+
+fn dot_radius(t: &Tokens) -> f32 {
+    t.ppm * 3.6
+}
+
+/// the rects the dynamic state (pressed keys / button / quick action, touch dots) paints; a frame repaints the old
+/// and the new set
+pub fn dyn_rects(m: &UiModel, out: &mut Vec<Rect>) {
+    for &i in &m.lit_keys {
+        if let Some(k) = m.keys.get(i) {
+            out.push(k.rect);
+        }
+    }
+    if let Some(b) = m.lit_button.and_then(|b| m.buttons.iter().find(|v| v.btn == b)) {
+        out.push(b.rect);
+        // a sheet control: its whole row (the control drawn by the sheet may be wider than the button)
+        if let (Btn::SheetRow(i) | Btn::SheetMinus(i) | Btn::SheetPlus(i) | Btn::SheetUp(i), Some(s)) = (b.btn, &m.sheet) {
+            if let Some(r) = s.rows.get(i as usize) {
+                out.push(r.rect);
+            }
+        }
+    }
+    if let Some(q) = m.lit_quick.and_then(|i| m.quick.get(i)) {
+        out.push(q.rect);
+    }
+    let r = m.px_per_mm.max(0.5) * 3.6;
+    for &(x, y) in &m.dots {
+        out.push(Rect::new(x - r, y - r, 2.0 * r, 2.0 * r));
+    }
+}
+
+fn h64(v: &impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v.hash(&mut h);
+    h.finish()
+}
+
+fn rbits(r: &Rect) -> [u32; 4] {
+    [r.x.to_bits(), r.y.to_bits(), r.w.to_bits(), r.h.to_bits()]
+}
+
+/// One entry per independently drawn element (rect + a hash of everything that changes its pixels, pressed states
+/// and dots excluded), item 0 = the frame (size, theme, modes, the layout of every area). Two lists that differ
+/// only in some hashes need only those rects repainted (`diff_items`); anything else is a full frame.
+pub fn scene_items(m: &UiModel, labels: Option<&crate::xkb::Labels>, out: &mut Vec<(Rect, u64)>) {
+    out.clear();
+    let frame = h64(&(
+        (rbits(&Rect::new(0.0, 0.0, m.w, m.h)), m.px_per_mm.to_bits(), &m.theme, m.desk.as_ref().map(|d| format!("{:?}", d))),
+        (m.edit, m.laser, m.select, m.laptop),
+        m.regions.iter().map(|r| (r.id.as_str(), rbits(&r.rect))).collect::<Vec<_>>(),
+        m.zones.map(|(a, b)| (rbits(&a), rbits(&b))),
+        m.mirror.map(|r| rbits(&r)),
+        m.guides.iter().map(|g| (g.vertical, g.pos.to_bits(), g.from.to_bits(), g.to.to_bits())).collect::<Vec<_>>(),
+        m.sheet.as_ref().map(|s| (rbits(&s.rect), s.tab, &s.title, &s.subtitle, s.rows.len())),
+        m.emoji.as_ref().map(|e| (rbits(&e.rect), e.page)),
+        (m.keys.len(), m.buttons.len(), m.quick.len(), m.bands.len()),
+    ));
+    out.push((Rect::new(0.0, 0.0, m.w, m.h), frame));
+    out.push((m.strip, h64(&(&m.title, &m.info, &m.notice, &m.hint))));
+    for b in &m.bands {
+        out.push((b.rect, h64(&(&b.id, &b.empty, b.chips.iter().map(|(l, r)| (l.as_str(), rbits(r))).collect::<Vec<_>>()))));
+    }
+    for q in &m.quick {
+        out.push((q.rect, h64(&(&q.id, &q.label))));
+    }
+    for k in &m.keys {
+        let icon = icon_of_key(k).is_some();
+        let label = if icon { String::new() } else { key_label(k, m, labels) };
+        out.push((k.rect, h64(&(label, key_on(m, k), key_locked(m, k), long_label(k, labels)))));
+    }
+    if let Some(s) = &m.sheet {
+        for r in &s.rows {
+            out.push((r.rect, h64(&(&r.title, r.live))));
+        }
+    }
+    for b in &m.buttons {
+        let sel = matches!(b.btn, Btn::EmojiTab(i) if m.emoji.as_ref().is_some_and(|e| e.page == i as usize));
+        let row = match (b.btn, &m.sheet) {
+            // a sheet control repaints with its row (the switch / chip / stepper spans the row's right side)
+            (Btn::SheetRow(i) | Btn::SheetMinus(i) | Btn::SheetPlus(i) | Btn::SheetUp(i), Some(s)) => s.rows.get(i as usize).map(|r| r.rect),
+            _ => None,
+        };
+        out.push((row.unwrap_or(b.rect), h64(&(&b.label, &b.name, sel, rbits(&b.rect)))));
+    }
+}
+
+/// the rects to repaint between two item lists; None = repaint everything (the frame or the structure changed)
+pub fn diff_items(old: &[(Rect, u64)], new: &[(Rect, u64)]) -> Option<Vec<Rect>> {
+    if old.len() != new.len() || old.is_empty() || old[0].1 != new[0].1 {
+        return None;
+    }
+    let mut v = vec![];
+    for (a, b) in old.iter().zip(new) {
+        if a.0 != b.0 {
+            return None;
+        }
+        if a.1 != b.1 {
+            v.push(b.0);
+        }
+    }
+    Some(v)
 }
 
 fn quick_button(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, q: &dexhid_core::router::QuickView, pressed: bool) {
     let r = q.rect;
+    if !cv.visible(&r) {
+        return;
+    }
     let rad = t.r_md.min(r.h / 2.0);
     cv.rrect(&r, rad, if pressed { c.accent } else { c.key_mod | 0xff00_0000 });
     let fg = if pressed { c.on_accent } else { c.text };
@@ -842,6 +1033,9 @@ fn quick_button(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, q: &dexhi
 }
 
 fn strip_button(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, m: &UiModel, b: &ButtonView, pressed: bool) {
+    if !cv.visible(&b.rect) {
+        return;
+    }
     let sel = matches!(b.btn, Btn::EmojiTab(i) if m.emoji.as_ref().is_some_and(|e| e.page == i as usize));
     match b.btn {
         Btn::Emoji(_) => {
@@ -861,21 +1055,26 @@ fn strip_button(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, m: &UiMod
 }
 
 fn sheet(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, m: &UiModel, s: &dexhid_core::router::SheetView) {
-    // scrim over the areas (static layer: once per open), then the card
+    // scrim over the areas, then the card
     cv.bar(&Rect::new(0.0, m.strip.bottom(), m.w, m.h - m.strip.bottom()), c.scrim);
+    if !cv.visible_m(&s.rect, t.s4 * 2.0) {
+        return;
+    }
     cv.shadow(&s.rect, t.r_lg, t.s4, c.shadow);
     cv.rrect(&s.rect, t.r_lg, c.raised | 0xff00_0000);
     // navigation rail
-    let tabs: Vec<&ButtonView> = m.buttons.iter().filter(|b| matches!(b.btn, Btn::SheetTab(_))).collect();
-    if let Some(b0) = tabs.first() {
+    if let Some(b0) = m.buttons.iter().find(|b| matches!(b.btn, Btn::SheetTab(_))) {
         let rail = Rect::new(s.rect.x, s.rect.y, b0.rect.right() + t.s2 - s.rect.x, s.rect.h);
         cv.rrect(&rail, t.r_lg, c.surface | 0xff00_0000);
         cv.fill(&Rect::new(rail.right() - t.r_lg, rail.y, t.r_lg, rail.h), c.surface | 0xff00_0000);
         cv.bar(&Rect::new(rail.right(), rail.y, t.hair, rail.h), c.hairline);
     }
-    for b in &tabs {
+    for b in m.buttons.iter().filter(|b| matches!(b.btn, Btn::SheetTab(_))) {
+        if !cv.visible(&b.rect) {
+            continue;
+        }
         let i = if let Btn::SheetTab(i) = b.btn { i as usize } else { 0 };
-        let sel = s.tab == i;
+        let sel = s.tab == i || m.lit_button == Some(b.btn);
         let planned = b.label.ends_with('\u{b7}');
         let label = b.label.trim_end_matches('\u{b7}').trim_end();
         let r = b.rect.inset(t.ppm * 0.2);
@@ -900,11 +1099,18 @@ fn sheet(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, m: &UiModel, s: 
     // rows
     let n = s.rows.len();
     for (i, r) in s.rows.iter().enumerate() {
+        if !cv.visible_m(&r.rect, t.ppm) {
+            continue;
+        }
         let idx = i as u8;
         let row_btn = m.buttons.iter().find(|b| b.btn == Btn::SheetRow(idx));
         let minus = m.buttons.iter().find(|b| b.btn == Btn::SheetMinus(idx));
         let plus = m.buttons.iter().find(|b| b.btn == Btn::SheetPlus(idx));
         let up = m.buttons.iter().find(|b| b.btn == Btn::SheetUp(idx));
+        let down = |b: Option<&ButtonView>| b.is_some_and(|b| m.lit_button == Some(b.btn));
+        if down(row_btn) {
+            cv.rrect(&r.rect, t.r_md, c.accent_soft);
+        }
         let ctl_x = [row_btn, minus, plus, up].iter().flatten().map(|b| b.rect.x).fold(r.rect.right(), f32::min);
         if i + 1 < n {
             cv.bar(&Rect::new(r.rect.x + t.s1, r.rect.bottom() + t.ppm * 0.4, r.rect.w - t.s1, t.hair), c.hairline);
@@ -918,8 +1124,9 @@ fn sheet(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, m: &UiModel, s: 
             for b in [minus, plus].into_iter().flatten() {
                 let d = b.rect.h.min(b.rect.w);
                 let cr = Rect::new(b.rect.x + (b.rect.w - d) / 2.0, b.rect.y + (b.rect.h - d) / 2.0, d, d);
-                cv.rrect(&cr, d / 2.0, c.key_mod | 0xff00_0000);
-                icon(cv, &cr, icon_of_btn(b).unwrap_or(Icon::Plus), d * 0.42, c.text);
+                let p = m.lit_button == Some(b.btn);
+                cv.rrect(&cr, d / 2.0, if p { c.accent } else { c.key_mod | 0xff00_0000 });
+                icon(cv, &cr, icon_of_btn(b).unwrap_or(Icon::Plus), d * 0.42, if p { c.on_accent } else { c.text });
             }
             f.text(cv, &vb.rect, v, t.t_body, c.text, Align::Center, 0.8);
         } else if v == "On" || v == "Off" || v == "on" || v == "off" {
@@ -935,34 +1142,11 @@ fn sheet(cv: &mut Canvas, f: &mut Fonts, t: &Tokens, c: &Roles, m: &UiModel, s: 
         if let Some(b) = up {
             let d = b.rect.h.min(b.rect.w);
             let cr = Rect::new(b.rect.x + (b.rect.w - d) / 2.0, b.rect.y + (b.rect.h - d) / 2.0, d, d);
+            if down(Some(b)) {
+                cv.rrect(&cr, d / 2.0, c.accent_soft);
+            }
             icon(cv, &cr, Icon::Arrow(3), d * 0.45, c.text_dim);
         }
-    }
-}
-
-/// dynamic layer: pressed keys / buttons / quick actions + touch dots; returns the logical rects touched
-pub fn draw_dynamic(cv: &mut Canvas, f: &mut Fonts, m: &UiModel, p: &Palette, corner: f32, labels: Option<&crate::xkb::Labels>, out: &mut Vec<Rect>) {
-    let t = Tokens::new(m.px_per_mm, corner);
-    let c = Roles::from(p);
-    for &i in &m.lit_keys {
-        if let Some(k) = m.keys.get(i) {
-            draw_key(cv, f, &t, &c, m, k, true, labels);
-            out.push(k.rect);
-        }
-    }
-    if let Some(b) = m.lit_button.and_then(|b| m.buttons.iter().find(|v| v.btn == b)) {
-        strip_button(cv, f, &t, &c, m, b, true);
-        out.push(b.rect);
-    }
-    if let Some(q) = m.lit_quick.and_then(|i| m.quick.get(i)) {
-        quick_button(cv, f, &t, &c, q, true);
-        out.push(q.rect);
-    }
-    let r = t.ppm * 3.6;
-    for &(x, y) in &m.dots {
-        cv.disc(x, y, r, alpha(c.accent, 0x50));
-        cv.disc(x, y, r * 0.45, alpha(c.accent, 0xd0));
-        out.push(Rect::new(x - r, y - r, 2.0 * r, 2.0 * r));
     }
 }
 
@@ -1019,10 +1203,32 @@ pub fn prompt_layout(w: f32, h: f32, ppm: f32) -> (Rect, Rect, Rect, Rect, Vec<(
     (card, icon_r, title_r, body_r, b)
 }
 
-pub fn draw_prompt(cv: &mut Canvas, f: &mut Fonts, p: &Palette, w: f32, h: f32, ppm: f32, lit: Option<Hit>) -> (Rect, Vec<(Rect, Hit)>) {
+fn shift(r: &Rect, o: (f32, f32)) -> Rect {
+    Rect::new(r.x - o.0, r.y - o.1, r.w, r.h)
+}
+
+/// the room around a card / pill for its shadow (a small surface is the card plus this on every side)
+pub fn shadow_room(ppm: f32) -> f32 {
+    Tokens::new(ppm, 1.0).s6
+}
+
+/// the prompt's small surface on a `w` x `h` screen: (surface size, its origin on the screen)
+pub fn prompt_surface(w: f32, h: f32, ppm: f32) -> ((i32, i32), (f32, f32)) {
+    let card = prompt_layout(w, h, ppm).0;
+    let room = shadow_room(ppm);
+    let (sw, sh) = (((card.w + 2.0 * room).ceil() as i32).min(w as i32).max(1), ((card.h + 2.0 * room).ceil() as i32).min(h as i32).max(1));
+    ((sw, sh), (((w - sw as f32) / 2.0).floor(), ((h - sh as f32) / 2.0).floor()))
+}
+
+/// the prompt drawn on a surface whose top-left sits at `origin` on the `w` x `h` screen (a full-screen surface:
+/// origin 0, 0); returns the card and the hit rects in surface coordinates
+#[allow(clippy::too_many_arguments)]
+pub fn draw_prompt(cv: &mut Canvas, f: &mut Fonts, p: &Palette, w: f32, h: f32, ppm: f32, lit: Option<Hit>, origin: (f32, f32)) -> (Rect, Vec<(Rect, Hit)>) {
     let t = Tokens::new(ppm, 1.0);
     let c = Roles::from(p);
     let (card, icon_r, title_r, body_r, hits) = prompt_layout(w, h, ppm);
+    let (card, icon_r, title_r, body_r) = (shift(&card, origin), shift(&icon_r, origin), shift(&title_r, origin), shift(&body_r, origin));
+    let hits: Vec<(Rect, Hit, &str)> = hits.into_iter().map(|(r, h, l)| (shift(&r, origin), h, l)).collect();
     cv.shadow(&card, t.r_lg * 1.5, t.s4, c.shadow + 0x20);
     cv.rrect(&card, t.r_lg * 1.5, c.raised | 0xff00_0000);
     cv.rrect_ring(&card, t.r_lg * 1.5, t.hair, c.hairline);
@@ -1051,16 +1257,32 @@ pub fn draw_prompt(cv: &mut Canvas, f: &mut Fonts, p: &Palette, w: f32, h: f32, 
     (card, hits.into_iter().map(|(r, h, _)| (r, h)).collect())
 }
 
-pub fn draw_pill(cv: &mut Canvas, f: &mut Fonts, p: &Palette, w: f32, ppm: f32, lit: Option<Hit>) -> (Rect, Vec<(Rect, Hit)>) {
+/// the "Use as pad" pill on a `w` wide screen: the pill and its two hit rects (screen coordinates)
+pub fn pill_layout(w: f32, ppm: f32) -> (Rect, Rect, Rect) {
+    let t = Tokens::new(ppm, 1.0);
+    let ph = t.target.max(10.0 * ppm);
+    let pw = (62.0 * ppm).min(w - 2.0 * t.s2).max(2.0 * ph);
+    let pill = Rect::new((w - pw) / 2.0, t.s2, pw, ph);
+    let hw = ph;
+    (pill, Rect::new(pill.x, pill.y, pw - hw, ph), Rect::new(pill.right() - hw, pill.y, hw, ph))
+}
+
+/// the pill's small surface (top edge, centred): (size, origin on the screen)
+pub fn pill_surface(w: f32, ppm: f32) -> ((i32, i32), (f32, f32)) {
+    let (pill, _, _) = pill_layout(w, ppm);
+    let room = shadow_room(ppm);
+    let sw = ((pill.w + 2.0 * room).ceil() as i32).min(w as i32).max(1);
+    let sh = (pill.bottom() + room).ceil() as i32;
+    ((sw, sh), (((w - sw as f32) / 2.0).floor(), 0.0))
+}
+
+pub fn draw_pill(cv: &mut Canvas, f: &mut Fonts, p: &Palette, w: f32, ppm: f32, lit: Option<Hit>, origin: (f32, f32)) -> (Rect, Vec<(Rect, Hit)>) {
     use Hit as H;
     let t = Tokens::new(ppm, 1.0);
     let c = Roles::from(p);
-    let ph = t.target.max(10.0 * ppm);
-    let pw = (62.0 * ppm).min(w - 2.0 * t.s2);
-    let pill = Rect::new((w - pw) / 2.0, t.s2, pw, ph);
-    let hw = ph;
-    let a = Rect::new(pill.x, pill.y, pw - hw, ph);
-    let b = Rect::new(pill.right() - hw, pill.y, hw, ph);
+    let (pill, a, b) = pill_layout(w, ppm);
+    let (pill, a, b) = (shift(&pill, origin), shift(&a, origin), shift(&b, origin));
+    let ph = pill.h;
     cv.shadow(&pill, ph / 2.0, t.s2, c.shadow);
     cv.rrect(&pill, ph / 2.0, c.raised | 0xff00_0000);
     if lit == Some(H::PillPad) {
@@ -1109,7 +1331,7 @@ mod tests {
         let (bw, bh) = (64, 48);
         let mut px = vec![0u32; (bw * bh) as usize];
         for scale in [1.0f32, 1.5, 2.0, 2.25] {
-            let mut cv = Canvas { px: &mut px, bw, bh, scale };
+            let mut cv = Canvas::new(&mut px, bw, bh, scale);
             for r in [Rect::new(-50.0, -50.0, 40.0, 40.0), Rect::new(10.0, 10.0, 0.0, 5.0), Rect::new(10.0, 10.0, -5.0, 5.0), Rect::new(-1e6, -1e6, 2e6, 2e6), Rect::new(30.0, 20.0, 0.3, 0.3), Rect::new(60.0, 40.0, 50.0, 50.0)] {
                 cv.rrect(&r, 8.0, 0xff336699);
                 cv.rrect(&r, 1e9, 0x80336699);
@@ -1133,7 +1355,7 @@ mod tests {
             let mut px = vec![0u32; (bw * bh) as usize];
             let r = Rect::new(20.0, 10.0, 90.0, 30.0);
             {
-                let mut cv = Canvas { px: &mut px, bw, bh, scale };
+                let mut cv = Canvas::new(&mut px, bw, bh, scale);
                 for align in [Align::Left, Align::Center, Align::Right] {
                     f.text(&mut cv, &r, "Keyboard: Full PC keyboard with numpad and more", 20.0, 0xffffffff, align, 0.8);
                 }

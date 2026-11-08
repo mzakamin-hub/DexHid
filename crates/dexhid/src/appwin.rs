@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
-//! M4 design prototype of the standalone app window (`dexhid debug render --window home|<module> --style m4`; not
-//! wired to Wayland yet). A normal xdg_toplevel on the internal panel: works without an external monitor and
-//! without grabbing the touchscreen (plain wl_touch / wl_pointer input). A navigation rail (Home + the settings
-//! registry's modules) and a page: Home (mode status, Start touchpad mode, Start USB mode with the live power / role
-//! line, the layout picker) or one settings module (rows from `settings::rows`). Laid out from constraints (tokens in
-//! mm, content width capped, two columns only when they fit), every target >= 9 mm, text ellipsized.
+//! M4: the standalone app window (`dexhid window`, `dexhid settings`, the app menu). A normal xdg_toplevel on the
+//! internal panel, made by the UI thread on request and destroyed on close (nothing exists while it is closed):
+//! works without an external monitor and without grabbing the touchscreen (plain wl_touch / wl_pointer input). A
+//! navigation rail (Home + the settings registry's modules) and a page: Home (the 3-way mode switch with its live
+//! lines and hints, the layout picker) or one settings module (rows from `settings::rows`, the same as the sheet).
+//! Laid out from constraints (tokens in mm, content width capped, two columns only when they fit), every target
+//! >= 9 mm, text ellipsized; long pages scroll by drag.
 
 use crate::look::{button, icon, Icon, Roles, Tokens, Tone};
 use crate::render::{Align, Canvas, Fonts};
@@ -12,16 +13,29 @@ use dexhid_core::feedback::Palette;
 use dexhid_core::geom::Rect;
 use dexhid_core::settings::Kind;
 
-/// what the window shows (built by the daemon from its state; the debug render fills it from defaults)
-#[derive(Clone, Debug, Default)]
+/// one settings row of the window
+#[derive(Clone, Debug, PartialEq)]
+pub struct WinRow {
+    pub key: String,
+    pub title: String,
+    pub value: String,
+    pub kind: Option<Kind>,
+}
+
+/// what the window shows (built by the daemon from its state, published when it changes)
+#[derive(Clone, Debug, PartialEq)]
 pub struct WinView {
-    /// 0 = Home, i + 1 = module i
+    /// 0 = Home, i + 1 = module i (the UI's own selection, set before drawing)
     pub page: usize,
-    /// module titles (the settings registry order)
+    /// module ids and titles (the settings registry order)
+    pub module_ids: Vec<String>,
     pub modules: Vec<String>,
-    /// the rows of the selected module: title, value, kind
-    pub rows: Vec<(String, String, Option<Kind>)>,
+    /// the rows of every module
+    pub module_rows: Vec<Vec<WinRow>>,
+    /// the rows of the selected module (filled from `module_rows` by `select`)
+    pub rows: Vec<WinRow>,
     pub subtitle: String,
+    pub palette: Palette,
     /// the persisted `mode_select`: "usb" | "pad" | "screen" (the one mode switch on Home)
     pub mode: String,
     /// what runs now, one line ("Keyboard + touchpad on DP-1", "Waiting for a host", "Released")
@@ -36,8 +50,49 @@ pub struct WinView {
     /// (name, title) of the layouts, and the current one
     pub layouts: Vec<(String, String)>,
     pub layout: String,
-    /// scroll offset of the page (logical px)
+    /// scroll offset of the page (logical px, the UI's own)
     pub scroll: f32,
+}
+
+impl Default for WinView {
+    fn default() -> WinView {
+        WinView {
+            page: 0,
+            module_ids: vec![],
+            modules: vec![],
+            module_rows: vec![],
+            rows: vec![],
+            subtitle: String::new(),
+            palette: dexhid_core::feedback::palette("dark", "#4a8be0", 100),
+            mode: "screen".into(),
+            mode_detail: String::new(),
+            monitor: false,
+            monitor_name: String::new(),
+            usb_line: String::new(),
+            usb_hint: String::new(),
+            layouts: vec![],
+            layout: String::new(),
+            scroll: 0.0,
+        }
+    }
+}
+
+impl WinView {
+    /// select a page: 0 = Home, i + 1 = module i (clamped)
+    pub fn select(&mut self, page: usize) {
+        self.page = page.min(self.modules.len());
+        self.rows = if self.page > 0 { self.module_rows.get(self.page - 1).cloned().unwrap_or_default() } else { vec![] };
+        self.subtitle = if self.page > 0 { "Changes apply at once and are saved to settings.toml".into() } else { String::new() };
+    }
+
+    /// the page index of "home" | "settings" (= the first module) | a module id
+    pub fn page_of(&self, name: &str) -> usize {
+        match name {
+            "home" | "" => 0,
+            "settings" => 1.min(self.modules.len()),
+            id => self.module_ids.iter().position(|m| m == id).map(|i| i + 1).unwrap_or(0),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +119,15 @@ pub struct WinLayout {
     pub hits: Vec<(Rect, WinHit)>,
     /// the page is taller than the window (scrolls)
     pub overflow: bool,
+    /// the page's bottom edge in unscrolled coordinates (for the scroll limit)
+    pub bottom: f32,
+}
+
+impl WinLayout {
+    /// the largest useful scroll offset for a window of height `h`
+    pub fn max_scroll(&self, h: f32, ppm: f32) -> f32 {
+        (self.bottom + 4.8 * ppm - h).max(0.0)
+    }
 }
 
 pub fn layout(w: f32, h: f32, ppm: f32, v: &WinView) -> WinLayout {
@@ -128,9 +192,11 @@ pub fn layout(w: f32, h: f32, ppm: f32, v: &WinView) -> WinLayout {
             l.hits.push((r, WinHit::Layout(i as u8)));
         }
         l.overflow |= c.bottom() > h;
+        l.bottom = c.bottom() + v.scroll;
     } else {
         let row_h = t.target.max(11.5 * t.ppm);
-        for (i, (_, _, kind)) in v.rows.iter().enumerate() {
+        l.bottom = y + v.rows.len() as f32 * row_h + v.scroll;
+        for (i, WinRow { kind, .. }) in v.rows.iter().enumerate() {
             let r = Rect::new(cx, y + i as f32 * row_h, cw, row_h);
             l.rows.push(r);
             let idx = i as u8;
@@ -309,7 +375,7 @@ pub fn draw(cv: &mut Canvas, f: &mut Fonts, p: &Palette, w: f32, h: f32, ppm: f3
     } else {
         let n = l.rows.len();
         for (i, r) in l.rows.iter().enumerate() {
-            let (title, value, kind) = &v.rows[i];
+            let WinRow { title, value, kind, .. } = &v.rows[i];
             if r.bottom() < 0.0 || r.y > h {
                 continue;
             }
@@ -352,32 +418,55 @@ pub fn draw(cv: &mut Canvas, f: &mut Fonts, p: &Palette, w: f32, h: f32, ppm: f3
     l
 }
 
+/// the rects to repaint when the daemon's view changes (`l` = the layout of `old`); None = repaint everything
+pub fn diff(old: &WinView, new: &WinView, l: &WinLayout) -> Option<Vec<Rect>> {
+    if old.page != new.page || old.scroll != new.scroll || old.palette != new.palette || old.modules != new.modules || old.layouts != new.layouts {
+        return None;
+    }
+    let mut v = vec![];
+    if new.page == 0 {
+        if (&old.mode, &old.mode_detail, old.monitor, &old.monitor_name, &old.usb_line, &old.usb_hint) != (&new.mode, &new.mode_detail, new.monitor, &new.monitor_name, &new.usb_line, &new.usb_hint) {
+            v.push(l.header);
+            v.extend(l.cards.first().copied());
+        }
+        if old.layout != new.layout {
+            v.extend(l.cards.get(3).copied());
+        }
+    } else {
+        if old.rows.len() != new.rows.len() || old.rows.len() != l.rows.len() {
+            return None;
+        }
+        for (i, (a, b)) in old.rows.iter().zip(&new.rows).enumerate() {
+            if a != b {
+                v.push(l.rows[i]);
+            }
+        }
+    }
+    Some(v)
+}
+
 /// the debug render's view: modules + rows from the default config, layouts from the layout dirs
 pub fn debug_view(page: &str, layouts: Vec<(String, String)>, monitor: bool) -> WinView {
     let cfg = dexhid_core::config::Config::default();
     let val = toml::Value::try_from(&cfg).unwrap_or(toml::Value::Table(Default::default()));
     let mods = dexhid_core::settings::MODULES;
-    let pi = if page == "home" { 0 } else { mods.iter().position(|m| m.id == page).map(|i| i + 1).unwrap_or(0) };
-    let rows = if pi > 0 {
-        dexhid_core::settings::rows(mods[pi - 1].id, &val, &Default::default()).into_iter().map(|r| (r.title, r.value, Some(r.kind))).collect()
-    } else {
-        vec![]
-    };
-    WinView {
-        page: pi,
+    let module_rows = mods.iter().map(|m| dexhid_core::settings::rows(m.id, &val, &Default::default()).into_iter().map(|r| WinRow { key: r.key, title: r.title, value: r.value, kind: Some(r.kind) }).collect()).collect();
+    let mut v = WinView {
+        module_ids: mods.iter().map(|m| m.id.to_string()).collect(),
         modules: mods.iter().map(|m| m.title.to_string()).collect(),
-        rows,
-        subtitle: if pi > 0 { "Changes apply at once and are saved to settings.toml".into() } else { String::new() },
+        module_rows,
         mode: "screen".into(),
         mode_detail: if monitor { "DP-1 connected".into() } else { "no external display".into() },
         monitor,
         monitor_name: if monitor { "DP-1".into() } else { String::new() },
         usb_line: "USB waiting for a host  |  no USB power in  |  data role device".into(),
-        usb_hint: String::new(),
         layout: "full".into(),
         layouts,
-        scroll: 0.0,
-    }
+        ..Default::default()
+    };
+    let p = v.page_of(page);
+    v.select(p);
+    v
 }
 
 #[cfg(test)]

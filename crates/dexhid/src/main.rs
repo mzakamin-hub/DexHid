@@ -7,7 +7,7 @@
 //!   dexhid toggle | release | resume | status | layout <name>       (D-Bus client of org.dexhid.DexHid1)
 //!   dexhid debug-connect | debug-disconnect                         (needs a daemon started with --debug)
 //!   dexhid debug list | grabtest | replay | volsim                  (test tools, see debug.rs)
-//!   dexhid set KEY [VALUE] | settings | quick ID                    (M2: settings registry, quick actions)
+//!   dexhid set KEY [VALUE] | settings [--json] | window [PAGE] | mode [usb|pad|screen] | quick ID  (M2 / M4)
 //!   dexhid guardian --fd N [--hb-ms MS]                             (the key guardian; started by the daemon)
 //!   dexhid profile list|save NAME [monitor] [app=CLASS]|use NAME|auto|delete NAME   (M3 profiles)
 //!   dexhid act CMD.. | hid-status                                   (M3 feature actions, USB HID state)
@@ -91,7 +91,7 @@ fn usage() -> i32 {
     eprintln!(
         "usage: dexhid daemon [--config FILE] [--touch-dev /dev/input/eventN] [--debug [--chord-test-dev P] [--simulate-connect]]\n       \
          dexhid toggle | release | resume | status | layout <name> | debug-connect | debug-disconnect\n       \
-         dexhid set KEY [VALUE] | settings | quick ID\n       \
+         dexhid set KEY [VALUE] | settings [--json] | window [PAGE] | mode [usb|pad|screen] | quick ID\n       \
          dexhid profile list|save NAME [monitor] [app=CLASS]|use NAME|auto|delete NAME | act CMD.. | hid-status\n       \
          dexhid hid-helper [--socket P] [--allow-uid N] [--configfs DIR]\n       \
          dexhid debug list | grabtest --dev P | replay --fifo F ... | volsim --fifo F ...\n       \
@@ -136,7 +136,25 @@ fn main() {
             (Some(k), v) => client("SetSetting", Some(&format!("{}\u{1f}{}", k, v.map(|s| s.as_str()).unwrap_or("")))),
             _ => usage(),
         },
-        Some("settings") => client("GetSettings", None),
+        // M4: the settings window; `--json` keeps the old print for scripts
+        Some("settings") if argv.iter().any(|a| a == "--json") => client("GetSettings", None),
+        Some("settings") => client("OpenSettings", None),
+        Some("window") if argv.get(1).map(|s| s.as_str()) == Some("--close") => client("CloseWindow", None),
+        Some("window") => client("OpenWindow", Some(argv.get(1).map(|s| s.as_str()).unwrap_or("home"))),
+        Some("mode") => match argv.get(1) {
+            Some(m) => client("SetMode", Some(m)),
+            None => match dbus::call("Status", None) {
+                Ok(s) => {
+                    let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
+                    println!("{} (in effect: {}){}", v["mode_select"].as_str().unwrap_or("?"), v["mode_effective"].as_str().unwrap_or("?"), v["mode_hint"].as_str().filter(|h| !h.is_empty()).map(|h| format!(": {}", h)).unwrap_or_default());
+                    0
+                }
+                Err(e) => {
+                    eprintln!("dexhid: {}", e);
+                    1
+                }
+            },
+        },
         Some("quick") => match argv.get(1) {
             Some(id) => client("RunQuick", Some(id)),
             None => usage(),

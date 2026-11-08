@@ -28,9 +28,38 @@ impl Api {
         self.sh.send(Cmd::Resume("dbus".into()));
         "ok".into()
     }
-    /// JSON
-    fn status(&self) -> String {
-        self.sh.status.lock().unwrap().clone()
+    /// JSON (built by the daemon on request)
+    fn status(&self) -> zbus::fdo::Result<String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.sh.send(Cmd::Status(tx));
+        rx.recv_timeout(std::time::Duration::from_secs(3)).map_err(|_| zbus::fdo::Error::Failed("daemon did not answer".into()))
+    }
+    /// M4: open the app window at a page: "home" | "settings" | a settings module id ("pointer", "usbhid", ...)
+    fn open_window(&self, page: &str) -> String {
+        let p: String = page.chars().take(40).filter(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+        self.sh.send(Cmd::OpenWindow(if p.is_empty() { "home".into() } else { p }));
+        "ok".into()
+    }
+    /// M4: close the app window (nothing of it stays: no surface, no buffers)
+    fn close_window(&self) -> String {
+        self.sh.send(Cmd::CloseWindow);
+        "ok".into()
+    }
+    /// M4: open the app window at the settings
+    fn open_settings(&self) -> String {
+        self.sh.send(Cmd::OpenWindow("settings".into()));
+        "ok".into()
+    }
+    /// M4: the one mode switch: "usb" | "pad" | "screen"; returns the mode, or an error with the hint (e.g. pad
+    /// without an external display)
+    fn set_mode(&self, mode: &str) -> zbus::fdo::Result<String> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        self.sh.send(Cmd::SetMode(mode.to_string(), Some(tx)));
+        match rx.recv_timeout(std::time::Duration::from_secs(8)) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(zbus::fdo::Error::Failed(e)),
+            Err(_) => Err(zbus::fdo::Error::Failed("daemon did not answer".into())),
+        }
     }
     fn set_layout(&self, name: &str) -> zbus::fdo::Result<String> {
         let names = self.sh.layout_names.lock().unwrap().clone();
