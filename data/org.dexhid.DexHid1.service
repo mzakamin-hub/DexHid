@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# M4: session-bus activation: a call to org.dexhid.DexHid1 (the CLI, the app menu) starts the user service
+[D-BUS Service]
+Name=org.dexhid.DexHid1
+Exec=/usr/bin/systemctl --user start dexhid.service
+SystemdService=dexhid.service

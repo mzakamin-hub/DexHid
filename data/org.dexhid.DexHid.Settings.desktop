@@ -1,0 +1,12 @@
+[Desktop Entry]
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# M4: opens the DexHid window at the settings (`dexhid settings --json` prints them for scripts)
+Type=Application
+Name=DexHid Settings
+Comment=Layouts, keyboard language, quick actions, USB keyboard and mouse mode and more
+Exec=dexhid settings
+Icon=preferences-desktop-peripherals
+Terminal=false
+StartupNotify=false
+Categories=Settings;HardwareSettings;
+Keywords=dexhid;touchpad;keyboard;usb;hid;

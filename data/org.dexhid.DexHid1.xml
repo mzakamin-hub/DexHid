@@ -32,6 +32,17 @@
     <method name="Act"><arg name="command" type="s" direction="in"/><arg type="s" direction="out"/></method>
     <!-- M3: USB HID state as JSON (target, sink, helper, power, data role) -->
     <method name="HidStatus"><arg type="s" direction="out"/></method>
+    <!-- M4: open the app window at a page: "home" | "settings" | a settings module id ("pointer", "usbhid", ...) -->
+    <method name="OpenWindow"><arg name="page" type="s" direction="in"/><arg type="s" direction="out"/></method>
+    <!-- M4: close the app window (nothing of it stays while closed) -->
+    <method name="CloseWindow"><arg type="s" direction="out"/></method>
+    <!-- M4: open the app window at the settings -->
+    <method name="OpenSettings"><arg type="s" direction="out"/></method>
+    <!-- M4: the mode switch: "usb" (keyboard + mouse of another computer) | "pad" (keyboard + touchpad for the
+         monitor; Failed with the hint when no external display is connected) | "screen" (release everything, no
+         prompt until the monitor is plugged again). Keys / buttons are released before anything changes. Returns the
+         mode; Status() has mode_select, mode_effective and mode_hint -->
+    <method name="SetMode"><arg name="mode" type="s" direction="in"/><arg type="s" direction="out"/></method>
     <!-- tests without a monitor: only when the daemon runs with --debug, AccessDenied otherwise -->
     <method name="DebugConnector"><arg name="connected" type="b" direction="in"/><arg type="s" direction="out"/></method>
     <!-- debug only: log "DEBUG-NOTE <text>" (KWin test scripts report through it) -->

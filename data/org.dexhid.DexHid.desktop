@@ -1,0 +1,27 @@
+[Desktop Entry]
+# SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
+# M4: the app menu entry opens the DexHid window (mode switch, layouts, settings); the actions switch the mode
+# directly. D-Bus activation (org.dexhid.DexHid1.service) starts the user service when it is not running.
+Type=Application
+Name=DexHid
+GenericName=Touchpad and keyboard mode
+Comment=Use the tablet as keyboard + touchpad for a monitor, as USB keyboard + mouse for another computer, or as a second screen
+Exec=dexhid window home
+Icon=input-tablet
+Terminal=false
+StartupNotify=false
+Categories=Utility;Accessibility;
+Keywords=touchpad;keyboard;dex;tablet;usb;hid;monitor;mouse;
+Actions=usb;pad;screen;
+
+[Desktop Action usb]
+Name=USB keyboard + mouse
+Exec=dexhid mode usb
+
+[Desktop Action pad]
+Name=Keyboard + touchpad
+Exec=dexhid mode pad
+
+[Desktop Action screen]
+Name=Second screen
+Exec=dexhid mode screen
