@@ -61,7 +61,20 @@ pub fn pick(l: &[String; 4], shift: bool, altgr: bool, caps: bool) -> String {
     String::new()
 }
 
-/// compile a keymap from RMLVO names (debug renders on the PC: `--xkb-layout de`)
+/// "de(nodeadkeys)" -> ("de", Some("nodeadkeys")); "us" -> ("us", None)
+pub fn split_layout(s: &str) -> (String, Option<String>) {
+    let s = s.trim();
+    match (s.find('('), s.ends_with(')')) {
+        (Some(i), true) if i > 0 => {
+            let v = &s[i + 1..s.len() - 1];
+            (s[..i].trim().to_string(), if v.trim().is_empty() { None } else { Some(v.trim().to_string()) })
+        }
+        _ => (s.to_string(), None),
+    }
+}
+
+/// compile a keymap from RMLVO names: an xkb layout code with an optional variant, "us" or "de(nodeadkeys)"
+/// (the USB target's legends; debug renders on the PC: `--xkb-layout de`)
 pub fn keymap_from_layout(layout: &str) -> Result<String, String> {
     #[repr(C)]
     struct Names {
@@ -83,8 +96,13 @@ pub fn keymap_from_layout(layout: &str) -> Result<String, String> {
             return Err("libxkbcommon: missing symbols".into());
         };
         let ctx = ctx_new(0);
-        let l = CString::new(layout).map_err(|_| "bad layout")?;
-        let n = Names { rules: std::ptr::null(), model: std::ptr::null(), layout: l.as_ptr(), variant: std::ptr::null(), options: std::ptr::null() };
+        let (lay, var) = split_layout(layout);
+        let l = CString::new(lay).map_err(|_| "bad layout")?;
+        let v = match var {
+            Some(v) => Some(CString::new(v).map_err(|_| "bad variant")?),
+            None => None,
+        };
+        let n = Names { rules: std::ptr::null(), model: std::ptr::null(), layout: l.as_ptr(), variant: v.as_ref().map(|v| v.as_ptr()).unwrap_or(std::ptr::null()), options: std::ptr::null() };
         let km = from(ctx, &n, 0);
         if km.is_null() {
             return Err(format!("no keymap for layout {}", layout));

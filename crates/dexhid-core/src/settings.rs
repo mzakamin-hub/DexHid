@@ -190,10 +190,11 @@ pub fn set(root: &mut toml::Table, path: &str, val: Value) {
 /// parse a value given as text (CLI / D-Bus) for a setting
 pub fn parse(d: &Def, s: &str) -> Result<Value, String> {
     match d.kind {
-        Kind::Bool => match s {
+        // M4: any case, so the "On" / "Off" that `dexhid settings` prints is accepted back
+        Kind::Bool => match s.trim().to_ascii_lowercase().as_str() {
             "true" | "on" | "1" | "yes" => Ok(Value::Boolean(true)),
             "false" | "off" | "0" | "no" => Ok(Value::Boolean(false)),
-            _ => Err(format!("{}: expected true / false", d.key)),
+            _ => Err(format!("{}: expected true / false (or on / off)", d.key)),
         },
         Kind::Choice(c) => {
             // M3: a gesture may run any quick action, custom ones included ("quick:<id>", checked by the daemon)
@@ -288,6 +289,16 @@ mod tests {
 
     fn cfgv() -> Value {
         Value::try_from(Config::default()).unwrap()
+    }
+
+    /// M4: the "On" / "Off" form `dexhid settings` prints is accepted by `dexhid set`
+    #[test]
+    fn bool_accepts_the_printed_form() {
+        let d = DEFS.iter().find(|d| d.kind == Kind::Bool).unwrap();
+        for (s, b) in [("On", true), ("Off", false), ("TRUE", true), ("false", false), (" on ", true), ("Yes", true), ("NO", false)] {
+            assert_eq!(parse(d, s), Ok(Value::Boolean(b)), "{}", s);
+        }
+        assert!(parse(d, "maybe").is_err());
     }
 
     #[test]

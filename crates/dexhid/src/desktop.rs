@@ -329,6 +329,29 @@ pub fn vibrator() -> Option<String> {
 
 // ------------------------------------------------------------------ KDE layout tracker
 
+/// the xkb layout codes of KDE's layout list: getLayoutsList gives (shortName, displayName, longName) per group;
+/// the variant comes from kxkbrc [Layout] VariantList when its LayoutList matches the same position. Result per
+/// group: "us", "de(nodeadkeys)". A missing short name falls back to the kxkbrc entry, then "us".
+pub fn xkb_codes(list: &[(String, String, String)], kxkbrc: Option<&str>) -> Vec<String> {
+    let (mut lays, mut vars): (Vec<String>, Vec<String>) = (vec![], vec![]);
+    if let Some(t) = kxkbrc {
+        let ini = dexhid_core::feedback::parse_ini(t);
+        let get = |k: &str| ini.get(&("Layout".to_string(), k.to_string())).map(|v| v.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()).unwrap_or_default();
+        lays = get("LayoutList");
+        vars = get("VariantList");
+    }
+    let n = if list.is_empty() { lays.len() } else { list.len() };
+    (0..n)
+        .map(|i| {
+            let short = list.get(i).map(|x| x.0.trim().to_string()).filter(|s| !s.is_empty() && !s.contains(' ')).or_else(|| lays.get(i).cloned().filter(|s| !s.is_empty())).unwrap_or_else(|| "us".into());
+            match (lays.get(i), vars.get(i)) {
+                (Some(l), Some(v)) if *l == short && !v.is_empty() => format!("{}({})", short, v),
+                _ => short,
+            }
+        })
+        .collect()
+}
+
 /// follows org.kde.keyboard /Layouts; sends Cmd::XkbGroup on start and on every layoutChanged
 pub fn kxkb_start(sh: SharedRef) {
     let _ = std::thread::Builder::new().name("kxkb".into()).spawn(move || {
@@ -337,12 +360,16 @@ pub fn kxkb_start(sh: SharedRef) {
             Err(_) => return,
         };
         let call = |m: &str| c.call_method(Some("org.kde.keyboard"), "/Layouts", Some("org.kde.KeyboardLayouts"), m, &());
+        // M4 fix: xkb codes ("us", "de(nodeadkeys)"), never the display name ("English (US)"): the USB target's
+        // legends compile a keymap from this
         let names = |c: &dyn Fn(&str) -> zbus::Result<zbus::message::Message>| -> Vec<String> {
-            c("getLayoutsList")
+            let list = c("getLayoutsList").ok().and_then(|m| m.body().deserialize::<Vec<(String, String, String)>>().ok()).unwrap_or_default();
+            let kxkbrc = std::env::var("XDG_CONFIG_HOME")
+                .map(std::path::PathBuf::from)
+                .or_else(|_| std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
                 .ok()
-                .and_then(|m| m.body().deserialize::<Vec<(String, String, String)>>().ok())
-                .map(|v| v.into_iter().map(|(short, _variant, long)| if long.is_empty() { short } else { long }).collect())
-                .unwrap_or_default()
+                .and_then(|d| std::fs::read_to_string(d.join("kxkbrc")).ok());
+            xkb_codes(&list, kxkbrc.as_deref())
         };
         let idx = match call("getLayout").and_then(|m| m.body().deserialize::<u32>().map_err(Into::into)) {
             Ok(i) => i,
@@ -601,6 +628,21 @@ pub fn desk_look() -> (Option<dexhid_core::feedback::DeskLook>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M4 fix: the USB target's "desktop" layout is an xkb code (+ variant), never KDE's display name
+    #[test]
+    fn kde_layouts_resolve_to_xkb_codes() {
+        let l = |a: &str, b: &str, c: &str| (a.to_string(), b.to_string(), c.to_string());
+        let list = vec![l("us", "en", "English (US)"), l("de", "de", "German (no dead keys)"), l("fr", "", "French")];
+        let rc = "[Layout]\nDisplayNames=,,\nLayoutList=us,de,fr\nUse=true\nVariantList=,nodeadkeys,\n";
+        assert_eq!(xkb_codes(&list, Some(rc)), vec!["us", "de(nodeadkeys)", "fr"]);
+        assert_eq!(xkb_codes(&list, None), vec!["us", "de", "fr"]);
+        // no D-Bus list: kxkbrc alone; a broken short name never leaks a display name
+        assert_eq!(xkb_codes(&[], Some(rc)), vec!["us", "de(nodeadkeys)", "fr"]);
+        assert_eq!(xkb_codes(&[l("", "", "English (US)")], None), vec!["us"]);
+        assert_eq!(crate::xkb::split_layout("de(nodeadkeys)"), ("de".to_string(), Some("nodeadkeys".to_string())));
+        assert_eq!(crate::xkb::split_layout("us"), ("us".to_string(), None));
+    }
 
     #[test]
     fn plasma_layout_kscreen_and_screen_pick() {

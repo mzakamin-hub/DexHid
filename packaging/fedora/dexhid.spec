@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later  (PROVISIONAL)
 # DexHid Fedora spec (M1 stub). Builds from a `cargo vendor` tarball (offline). Not built yet: the RPM build
 # needs a Fedora aarch64 build root (mock / the tablet / Copr); the M1 test binary is cross-built in WSL instead.
-# Before a Fedora review: rust2rpm with packaged crates where they exist, %cargo_license_summary, check the
+# Before a Fedora review: rust2rpm with packaged crates where they exist, %%cargo_license_summary, check the
 # current Rust vendoring guideline; licence still provisional.
 
 %global debug_package %{nil}
