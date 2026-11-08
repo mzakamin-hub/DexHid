@@ -59,19 +59,19 @@ text.
   - tap-on-release with a 150 ms stationary hold, and slide-off cancel;
   - a cancelled lone modifier does not open the launcher.
 - **Gestures:** whole-screen 3- and 4-finger swipes work even over the keys and reach the desktop as touchpad
-  gestures. Gesture shortcuts can be configured: back / forward, switch desktops, overview, show desktop, app switch,
+  gestures. Gesture shortcuts *(untested on hardware yet)* can be configured: back / forward, switch desktops, overview, show desktop, app switch,
   middle click, or any quick action.
 - **Quick-action strip:** copy, paste, cut, undo, redo, select all, find and save; window, system and media
   actions; and your own key chords or commands.
-- **Clipboard history:** a strip of the last 5-10 entries. It uses Klipper on KDE, otherwise wlr data-control.
-- **Word suggestions and emoji panel:** suggestions come from a local word list plus your own words file. The emoji
+- **Clipboard history** *(untested on hardware yet)*: a strip of the last 5-10 entries. It uses Klipper on KDE, otherwise wlr data-control.
+- **Word suggestions and emoji panel** *(untested on hardware yet)*: suggestions come from a local word list plus your own words file. The emoji
   panel has five pages.
-- **Text editing:** a select-mode key and a cursor joystick key.
-- **Presentation:** a laser pointer (an absolute pointer mapped to the monitor) and a talk timer in the strip.
-- **Pen on the monitor:** the pen works as a relative pointer, or as a drawing tablet with pressure and tilt.
-- **Mirror preview:** a small live view of the monitor in a corner of the touchpad, through the xdg-desktop-portal
+- **Text editing** *(untested on hardware yet)*: a select-mode key and a cursor joystick key.
+- **Presentation** *(untested on hardware yet)*: a laser pointer (an absolute pointer mapped to the monitor) and a talk timer in the strip.
+- **Pen on the monitor** *(untested on hardware yet)*: the pen works as a relative pointer, or as a drawing tablet with pressure and tilt.
+- **Mirror preview** *(untested on hardware yet)*: a small live view of the monitor in a corner of the touchpad, through the xdg-desktop-portal
   ScreenCast API.
-- **Profiles** per monitor or per app (`dexhid profile ...`), layered over the settings.
+- **Profiles** *(untested on hardware yet)* per monitor or per app (`dexhid profile ...`), layered over the settings.
 - **Look:** dark, light, AMOLED, or follow the desktop's colours. Sizes are set in millimetres. An optional
   half-resolution rendering mode is available.
 - **Comfort:** the panel dims while in pad mode and is restored on exit. Rest zones, palm rejection and
