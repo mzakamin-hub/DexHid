@@ -16,3 +16,9 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# M4: `blocking` with idle pool threads that exit (upstream 1.7 keeps them and wakes each every 500 ms; zbus uses the
+# pool for its socket connect / close). Copy of blocking 1.7.0 (Apache-2.0 OR MIT), one change, see
+# third_party/blocking/DEXHID-PATCH.md
+[patch.crates-io]
+blocking = { path = "third_party/blocking" }
