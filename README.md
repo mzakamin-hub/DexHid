@@ -1,6 +1,14 @@
 # DexHid
 
-DexHid turns a Linux tablet's touchscreen into a keyboard and a touchpad. It has three modes:
+**Plug your Linux tablet into a monitor and the tablet becomes that monitor's keyboard and mouse.**
+
+That is DexHid's main purpose. Connect an external display to the tablet's USB-C port (DisplayPort alt mode, directly
+or through a USB-C dock). The desktop moves to the big screen, and the tablet's own touchscreen turns into a full
+keyboard and a multitouch touchpad that drive it. You get a desktop PC set-up — monitor in front, tablet as keyboard
+and touchpad — with no extra keyboard or mouse to carry, similar in spirit to Samsung DeX's "phone as touchpad".
+
+The same app can also make the tablet a USB keyboard and mouse for another computer, or simply step aside and leave
+the tablet as a normal second screen. DexHid has three modes:
 
 | Mode | What the tablet does |
 |---|---|
@@ -15,21 +23,35 @@ DexHid is a small Rust daemon. It does not depend on a distribution or a composi
 - It draws its UI as a Wayland layer-shell overlay on the internal panel.
 - It runs as a systemd user service with a session D-Bus API (`org.dexhid.DexHid1`) and a CLI.
 
-![Keyboard + touchpad mode, landscape: full PC keyboard, quick actions, touchpad](docs/screenshots/pad-mode-landscape.png)
+![Keyboard + touchpad mode on the tablet, landscape: full PC keyboard, quick actions and touchpad](docs/screenshots/pad-landscape.png)
+
+### How it works, in short
+
+1. Plug a monitor into the tablet's USB-C port. DexHid notices the new output (`DP-*`) and asks once: *Use as pad*,
+   *Keep as display*, *Always* or *Never*.
+2. In pad mode the desktop goes to the monitor. The tablet screen shows the keyboard, the touchpad and a quick-action
+   strip. Everything you type or swipe goes to the monitor's desktop as if a real keyboard and touchpad were plugged
+   in (they are virtual `uinput` devices, so your desktop's layout, libinput and gesture settings all apply).
+3. Unplug the monitor, tap *Exit*, or hold five fingers on the screen, and the tablet is a normal tablet again.
 
 ## Screenshots
 
+All screenshots below are real captures from a OnePlus Pad 4 (Fedora 45, KDE Plasma 6.8), except the two marked
+*render*.
+
 | | |
 |---|---|
-| ![App window, Home: the 3-way mode switch with keyboard + touchpad active](docs/screenshots/window-home-keyboard-touchpad.png) | ![App window, Home: second screen, no monitor connected](docs/screenshots/window-home-second-screen.png) |
-| App window, Home: the mode switch and the layout picker | Second screen mode; keyboard + touchpad is greyed out without a monitor |
-| ![App window, light theme: USB keyboard + mouse with a host-role hint](docs/screenshots/window-home-usb-light.png) | ![Settings sheet, Touchpad page](docs/screenshots/settings-sheet-touchpad.png) |
-| USB keyboard + mouse, light theme, with a live USB-role hint | Settings sheet over the pad (Touchpad page) |
-| ![Edit mode: drag to move, edges and corners to resize](docs/screenshots/edit-mode-move-resize.png) | ![Portrait: quick actions, touchpad and full keyboard](docs/screenshots/pad-mode-portrait.png) |
-| Edit mode: move and resize the keyboard, touchpad and quick-action areas | Portrait orientation |
+| ![Pad mode in portrait: quick actions on top, touchpad, full keyboard](docs/screenshots/pad-portrait.png) | ![App window, Home: USB keyboard + mouse active, live USB and power line](docs/screenshots/app-home-usb.png) |
+| Pad mode in portrait: quick actions, touchpad, full PC keyboard | App window, Home: USB keyboard + mouse for another computer, with the live USB-role and power line |
+| ![App window, Home: second screen, keyboard + touchpad greyed out without a monitor](docs/screenshots/app-home-second-screen.png) | ![App window, Touchpad settings page](docs/screenshots/app-settings-touchpad.png) |
+| Home: second screen; *Keyboard + touchpad* waits for a monitor | Settings: the Touchpad page |
+| ![App window, General settings page](docs/screenshots/app-settings-general.png) | ![Render: Home with keyboard + touchpad active](docs/screenshots/window-home-keyboard-touchpad.png) |
+| Settings: the General page (monitor hotplug behaviour, arrangement, mode) | *Render:* Home with *Keyboard + touchpad* active (needs a monitor) |
+| ![Render: edit mode, drag to move, edges and corners to resize](docs/screenshots/edit-mode-move-resize.png) | |
+| *Render:* edit mode, move and resize the keyboard, touchpad and quick-action areas | |
 
-The screenshots are renders of DexHid's own UI at the panel's aspect ratio. Clipboard and suggestion entries are demo
-text.
+The pad captures were taken with a simulated monitor (`dexhid daemon --debug --simulate-connect`), which is why the
+strip says *simulated display*.
 
 ## Features
 
@@ -135,6 +157,121 @@ Measured on a OnePlus Pad 4 (Fedora 45, KDE Plasma 6.8, mainline Linux) with the
 While idle there are no timers: the UI, guardian and HID helper sleep until an event arrives. Repaints are partial:
 a Shift press redraws only the keys whose legend changes, and a settings tap redraws only its row.
 
+## Requirements
+
+### Hardware
+
+| Need | For | Notes |
+|---|---|---|
+| A touchscreen with multitouch (evdev MT protocol B) | all modes | The internal panel; at least 5 contacts for the 5-finger release |
+| USB-C with **DisplayPort alt mode** (or a dock that outputs DP / HDMI) | keyboard + touchpad mode | The external display must show up as a DRM connector, e.g. `DP-1` |
+| USB-C port that can run in **device (peripheral) role** | USB keyboard + mouse mode only | A dual-role controller (e.g. dwc3) with a role switch; not through a hub or dock |
+| Volume keys (or any two buttons) | emergency release chord | Optional; read passively, never grabbed |
+| An active pen | pen features | Optional |
+
+### Kernel
+
+| Option | For |
+|---|---|
+| `CONFIG_INPUT_UINPUT` | the virtual keyboard and touchpad (always needed) |
+| `CONFIG_INPUT_EVDEV` | reading the touchscreen, pen and keys |
+| `CONFIG_DRM` with the SoC's DisplayPort / USB-C alt-mode driver, `CONFIG_TYPEC` | detecting the external monitor |
+| `CONFIG_USB_CONFIGFS`, `CONFIG_USB_CONFIGFS_F_HID`, `CONFIG_USB_LIBCOMPOSITE`, a UDC driver in OTG / peripheral mode, `CONFIG_USB_ROLE_SWITCH` | USB keyboard + mouse mode only |
+
+### Desktop and system
+
+| Need | Required? | Why |
+|---|---|---|
+| A **Wayland** compositor with `wlr-layer-shell` (`zwlr_layer_shell_v1`) | required | The pad overlay is a layer-shell surface on the internal panel. KWin, Sway, Hyprland, Wayfire, labwc and niri have it; GNOME's Mutter does not |
+| `xdg-shell`, `wl_shm`, `wl_seat`, `wl_output` | required | The app window and rendering (software, no GPU needed) |
+| **systemd** (user services, logind) | required | The daemon runs as a user service with a watchdog; lock / suspend events trigger the release |
+| A **session D-Bus** | required | The API (`org.dexhid.DexHid1`), the CLI and the app-menu entries talk over it |
+| **udev** with `uaccess` | required | Gives the logged-in user access to `/dev/uinput`, the touchscreen, pen and keys (`data/70-dexhid.rules`) |
+| `libxkbcommon` | recommended | Key legends follow the desktop's keyboard layout; without it they stay US |
+| `wlr-data-control` or KDE Klipper | optional | Clipboard history |
+| GStreamer (`gstreamer1-plugins-base`) + `pipewire-gstreamer` + xdg-desktop-portal | optional | Mirror preview of the monitor |
+| Noto Emoji or Symbola fonts | optional | Emoji panel glyphs |
+| `libinput-utils` | optional | Debugging the virtual touchpad (`libinput debug-events`) |
+| KDE Plasma 6 | optional | Extras: panels follow the monitor, live layout tracking, desktop colours |
+
+## Dependencies
+
+### Build
+
+- **Rust** (stable toolchain, edition 2021) and Cargo. No C headers or `pkg-config` libraries are needed: Wayland,
+  D-Bus and uinput are spoken directly, and libxkbcommon is loaded at run time.
+- Fedora RPM builds also use `cargo-rpm-macros`, `systemd-rpm-macros` and `desktop-file-utils`.
+
+### Rust crates
+
+| Crate | Version | Used for |
+|---|---|---|
+| `wayland-client` | 0.31 | Wayland connection, surfaces, input |
+| `wayland-protocols` | 0.32 | `xdg-shell` and other standard protocols |
+| `wayland-protocols-wlr` | 0.3 | `wlr-layer-shell` (overlay), `wlr-data-control` (clipboard) |
+| `zbus` | 5 (`blocking-api`, `async-io`) | The session D-Bus API, logind and portal calls |
+| `ab_glyph` | 0.2 | Text rendering into shared-memory buffers |
+| `serde`, `serde_json`, `toml` | 1, 1, 0.9 | Settings, layouts, device presets, JSON status |
+| `libc` | 0.2 | uinput / evdev ioctls, configfs, signals |
+| `blocking` | 1.7.0, vendored in `third_party/` | One patch so idle pool threads exit (no idle wake-ups) |
+
+`Cargo.lock` pins every transitive crate; the RPM build vendors them and lists their licences in
+`LICENSE.dependencies`.
+
+### Run time (Fedora package names)
+
+`libxkbcommon` (required by the RPM); recommended: `libinput-utils`, `gstreamer1-plugins-base`, `pipewire-gstreamer`.
+
+## Porting DexHid to another device
+
+DexHid has no device-specific code: everything about a device lives in one preset file and a few udev lines. To
+bring it to another tablet, phone or laptop:
+
+1. **Check the requirements above.** Most important: a Wayland compositor with `wlr-layer-shell`, `uinput`, and an
+   external display that appears as a DRM connector when plugged in (check with `ls /sys/class/drm/` or
+   `kscreen-doctor -o` / `wlr-randr` before and after plugging the monitor in).
+2. **Find your input devices:**
+   ```bash
+   sudo libinput list-devices        # or: cat /proc/bus/input/devices
+   ```
+   Note the exact names of the internal touchscreen, the pen (if any) and the device(s) that carry the volume keys
+   (often `gpio-keys` and a PMIC "resin" device on Qualcomm).
+3. **Find the internal output and the panel size:** the internal connector name (e.g. `DSI-1`, `eDP-1`) from
+   `kscreen-doctor -o` / `wlr-randr`, and the visible panel size in millimetres (from the spec sheet, or
+   `/sys/class/drm/*/edid` / the device tree `width-mm` / `height-mm`).
+4. **Find the match key:** the device-tree compatible (`tr '\0' '\n' < /proc/device-tree/compatible`, first entry).
+   Presets match only device-tree compatibles. On ACPI machines (x86 tablets and laptops), put the same keys into
+   `/etc/dexhid/config.toml` instead of a preset. `internal_output = "auto"` picks the first DSI / eDP / LVDS
+   output, and the defaults already treat `DP-*`, `HDMI-*` and `USB-C-*` as external.
+5. **Write a preset** `data/devices/<vendor>-<device>.toml`, modelled on the OnePlus Pad 4 one:
+   ```toml
+   # SPDX-License-Identifier: GPL-3.0-or-later
+   match_compatible = ["oneplus,iceland"]   # your device-tree compatible
+   touchscreen = "NVTCapacitiveTouchScreen"  # exact evdev name of the internal touchscreen
+   pen = "NVTCapacitivePen"                  # exact evdev name of the pen, or leave out
+   internal_output = "DSI-1"                 # the tablet's own panel ("auto" = first DSI / eDP / LVDS output)
+   size_mm = [274.0, 193.0]                  # panel width, height in mm, native orientation (sets key sizes)
+   external_connectors = ["DP-*"]            # globs of connectors that count as "a monitor was plugged in"
+   ```
+   Any key from `data/config.example.toml` can also go into a preset (e.g. `release_chord` if your device has
+   different buttons):
+   ```toml
+   release_chord = ["KEY_VOLUMEUP", "KEY_VOLUMEDOWN"]
+   ```
+6. **Add udev lines** to `data/70-dexhid.rules` (copy the existing ones and change the `ATTRS{name}` values): mark the
+   touchscreen with `DEXHID_INTERNAL`, the pen with `DEXHID_PEN` and the key devices with `DEXHID_CHORD`, so the seat
+   user gets access through `uaccess`. Then reload: `sudo udevadm control --reload && sudo udevadm trigger`.
+7. **USB keyboard + mouse mode (optional):** make sure the USB-C controller can switch to device role
+   (`cat /sys/class/usb_role/*/role`) and that `/sys/kernel/config/usb_gadget` exists. `dexhid hid-status` shows the
+   role, the UDC and the power line, and says why the mode would refuse to start.
+8. **Test without a monitor:** run `dexhid daemon --debug --simulate-connect`, then `dexhid mode pad`. The pad comes up
+   as if a monitor were connected; check the touch mapping in both orientations, the 5-finger release and the
+   emergency chord. `libinput debug-events` shows what the virtual touchpad and keyboard emit.
+9. **Send the preset and udev lines upstream** as a pull request, with the device name and what you tested.
+
+On a desktop without `wlr-layer-shell` (GNOME), the daemon, the CLI and the USB HID mode still work, but the on-screen
+pad cannot be drawn.
+
 ## Install
 
 ### Fedora (RPM)
@@ -175,9 +312,7 @@ spec uses:
 | `org.dexhid.DexHid*.desktop`, `dexhid.desktop` | `/usr/share/applications/`, `/etc/xdg/autostart/` | The app-menu entries and autostart |
 | `layouts/*.toml`, `devices/*.toml`, `config.example.toml` | `/usr/share/dexhid/` | The keyboard layouts, the device presets and the example configuration |
 
-To build it you only need Rust (stable); there are no C library headers to install. At run time it loads
-libxkbcommon (without it the key legends stay US). The mirror preview also needs GStreamer with
-`pipewire-gstreamer`.
+See [Requirements](#requirements) and [Dependencies](#dependencies) for what the build and the run time need.
 
 ## Configuration
 
@@ -189,8 +324,8 @@ Most options are in the app window. The file configuration is merged in this ord
 4. `~/.config/dexhid/config.toml`.
 
 `data/config.example.toml` documents every key. A device preset names the touchscreen, the pen, the internal output,
-the panel size and the external connectors. To port DexHid to another tablet, add a preset and the matching udev
-lines in `70-dexhid.rules`. Custom layouts go to `~/.local/share/dexhid/layouts/`, and extra suggestion words to
+the panel size and the external connectors; see [Porting DexHid to another device](#porting-dexhid-to-another-device).
+Custom layouts go to `~/.local/share/dexhid/layouts/`, and extra suggestion words to
 `~/.config/dexhid/words.txt`.
 
 ## Uninstall
