@@ -14,6 +14,13 @@ pub const TEXT_DIM: u32 = 0xff8b95a5;
 pub const CARD: u32 = 0xf0202630;
 pub const SHADE: u32 = 0x00000000;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+}
+
 pub struct Canvas<'a> {
     pub px: &'a mut [u32],
     /// buffer size (px)
@@ -102,6 +109,206 @@ impl<'a> Canvas<'a> {
 
     pub fn circle(&mut self, cx: f32, cy: f32, rad: f32, c: u32) {
         self.round_rect(&Rect::new(cx - rad, cy - rad, rad * 2.0, rad * 2.0), rad, c);
+    }
+
+    // ---------------------------------------------------------------- M4 anti-aliased primitives
+    // Coverage comes from a signed distance (buffer px, < 0 inside). Interior spans are filled without any per-pixel
+    // maths; only the 1-2 px boundary band and the corner arcs are evaluated. All clipped to the buffer: any rect,
+    // also negative / huge / NaN-free zero-size ones, is safe.
+
+    #[inline]
+    fn put(&mut self, x: i32, y: i32, c: u32, cov: f32) {
+        if cov <= 0.0 || x < 0 || y < 0 || x >= self.bw || y >= self.bh {
+            return;
+        }
+        let a = (((c >> 24) as f32) * cov.min(1.0)).round() as u32;
+        let i = (y * self.bw + x) as usize;
+        self.px[i] = blend(self.px[i], (a << 24) | (c & 0x00ff_ffff));
+    }
+
+    #[inline]
+    fn span(&mut self, y: i32, a: i32, b: i32, c: u32) {
+        let (a, b) = (a.max(0), b.min(self.bw));
+        if y < 0 || y >= self.bh || a >= b {
+            return;
+        }
+        let row = (y * self.bw) as usize;
+        let al = c >> 24;
+        if al == 255 {
+            self.px[row + a as usize..row + b as usize].fill(c);
+        } else {
+            // constant-colour src-over with the source terms hoisted and /255 as a multiply-shift
+            let inv = 255 - al;
+            let (sr, sg, sb, sa) = (((c >> 16) & 255) * al, ((c >> 8) & 255) * al, (c & 255) * al, al * 255);
+            let div = |v: u32| ((v + 128) * 257) >> 16;
+            for p in &mut self.px[row + a as usize..row + b as usize] {
+                let d = *p;
+                let r = div(sr + ((d >> 16) & 255) * inv);
+                let g = div(sg + ((d >> 8) & 255) * inv);
+                let bl = div(sb + (d & 255) * inv);
+                let oa = div(sa + (d >> 24) * inv);
+                *p = (oa << 24) | (r << 16) | (g << 8) | bl;
+            }
+        }
+    }
+
+    /// signed distance of (px, py) to a rounded box (centre, half size, radius), buffer px
+    #[inline]
+    fn sd_rrect(px: f32, py: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
+        let qx = (px - cx).abs() - (hx - r);
+        let qy = (py - cy).abs() - (hy - r);
+        let ox = qx.max(0.0);
+        let oy = qy.max(0.0);
+        (ox * ox + oy * oy).sqrt() + qx.max(qy).min(0.0) - r
+    }
+
+    /// M4: anti-aliased filled rounded rect (logical coordinates)
+    pub fn rrect(&mut self, r: &Rect, radius: f32, c: u32) {
+        self.rrect_ring(r, radius, f32::INFINITY, c);
+    }
+
+    /// M4: anti-aliased rounded-rect outline of width `w` (logical px) inside `r`; `w = INFINITY` fills
+    pub fn rrect_ring(&mut self, r: &Rect, radius: f32, w: f32, c: u32) {
+        let s = self.scale;
+        let (fx0, fy0, fx1, fy1) = (r.x * s, r.y * s, r.right() * s, r.bottom() * s);
+        if !(fx1 - fx0 > 0.0 && fy1 - fy0 > 0.0) || c >> 24 == 0 {
+            return;
+        }
+        let (hx, hy) = ((fx1 - fx0) / 2.0, (fy1 - fy0) / 2.0);
+        let (cx, cy) = (fx0 + hx, fy0 + hy);
+        let rad = (radius * s).clamp(0.0, hx.min(hy));
+        let ww = (w * s).max(0.0);
+        let x0 = (fx0.floor() as i32).max(0);
+        let x1 = (fx1.ceil() as i32).min(self.bw);
+        let y0 = (fy0.floor() as i32).max(0);
+        let y1 = (fy1.ceil() as i32).min(self.bh);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        let cov_at = |x: i32, y: i32| -> f32 {
+            let d = Self::sd_rrect(x as f32 + 0.5, y as f32 + 0.5, cx, cy, hx, hy, rad);
+            let outer = (0.5 - d).clamp(0.0, 1.0);
+            if ww.is_finite() {
+                outer.min((0.5 + d + ww).clamp(0.0, 1.0))
+            } else {
+                outer
+            }
+        };
+        for y in y0..y1 {
+            let py = y as f32 + 0.5;
+            // the shape's exact horizontal extent on this row
+            let dy = if py < fy0 + rad { fy0 + rad - py } else if py > fy1 - rad { py - (fy1 - rad) } else { 0.0 };
+            let inset = if dy > 0.0 { rad - (rad * rad - dy * dy).max(0.0).sqrt() } else { 0.0 };
+            let ring = ww.is_finite();
+            let edge = if ring { ww + rad + 1.5 } else { 1.5 };
+            if py - fy0 < edge || fy1 - py < edge {
+                // boundary rows (the ring's top / bottom bands with the corner arcs): per pixel near the sides; in
+                // the middle (farther from the sides than from the top / bottom edge) the distance only depends on
+                // the row, so one coverage for the whole span
+                let side = (if ring { ww } else { 0.0 } + rad + 2.0).ceil() as i32;
+                let (ml, mr) = (((fx0.ceil() as i32) + side).max(x0), ((fx1.floor() as i32) - side).min(x1));
+                if ml < mr {
+                    for x in x0..ml {
+                        let cv = cov_at(x, y);
+                        self.put(x, y, c, cv);
+                    }
+                    let cv = cov_at((ml + mr) / 2, y);
+                    if cv >= 1.0 {
+                        self.span(y, ml, mr, c);
+                    } else if cv > 0.0 {
+                        let a = (((c >> 24) as f32) * cv).round() as u32;
+                        self.span(y, ml, mr, (a << 24) | (c & 0x00ff_ffff));
+                    }
+                    for x in mr..x1 {
+                        let cv = cov_at(x, y);
+                        self.put(x, y, c, cv);
+                    }
+                } else {
+                    for x in x0..x1 {
+                        let cv = cov_at(x, y);
+                        self.put(x, y, c, cv);
+                    }
+                }
+                continue;
+            }
+            if ring {
+                // straight sides only: the left and right bands
+                let band = ww.ceil() as i32 + 2;
+                let l_end = (x0 + band).min(x1);
+                for x in x0..l_end {
+                    let cv = cov_at(x, y);
+                    self.put(x, y, c, cv);
+                }
+                for x in (x1 - band).max(l_end)..x1 {
+                    let cv = cov_at(x, y);
+                    self.put(x, y, c, cv);
+                }
+                continue;
+            }
+            // full interior between the boundary bands, per-pixel only within 1.5 px of the edges
+            let l_full = ((fx0 + inset + 1.0).ceil() as i32).max(x0);
+            let r_full = ((fx1 - inset - 1.0).floor() as i32).min(x1);
+            for x in x0..l_full.min(x1) {
+                let cv = cov_at(x, y);
+                self.put(x, y, c, cv);
+            }
+            if l_full < r_full {
+                self.span(y, l_full, r_full, c);
+            }
+            for x in r_full.max(l_full).max(x0)..x1 {
+                let cv = cov_at(x, y);
+                self.put(x, y, c, cv);
+            }
+        }
+    }
+
+    /// M4: a hairline / thin bar snapped to whole buffer px, never thinner than one px (no vanishing separators at
+    /// fractional positions)
+    pub fn bar(&mut self, r: &Rect, c: u32) {
+        let s = self.scale;
+        let x0 = (r.x * s).floor() as i32;
+        let y0 = (r.y * s).floor() as i32;
+        let x1 = ((r.right() * s).round() as i32).max(x0 + 1);
+        let y1 = ((r.bottom() * s).round() as i32).max(y0 + 1);
+        for y in y0.max(0)..y1.min(self.bh) {
+            self.span(y, x0, x1, c);
+        }
+    }
+
+    /// M4: anti-aliased disc
+    pub fn disc(&mut self, cx: f32, cy: f32, rad: f32, c: u32) {
+        self.rrect(&Rect::new(cx - rad, cy - rad, rad * 2.0, rad * 2.0), rad, c);
+    }
+
+    /// M4: a cheap soft shadow under an opaque rounded rect: three expanding low-alpha rings, offset down. Only the
+    /// band around the shape is painted (the shape covers the rest), so the cost follows the perimeter, not the area.
+    pub fn shadow(&mut self, r: &Rect, radius: f32, elev: f32, alpha: u32) {
+        if elev <= 0.0 {
+            return;
+        }
+        for (k, a) in [(1.0f32, alpha / 2), (0.6, alpha / 3), (0.3, alpha / 3)] {
+            let e = elev * k;
+            let rr = Rect::new(r.x - e * 0.5, r.y + elev * 0.35 - e * 0.25, r.w + e, r.h + e);
+            self.rrect_ring(&rr, radius + e * 0.5, e + elev * 0.5 + 2.0 / self.scale + radius * 0.3, a.min(255) << 24);
+        }
+    }
+
+    /// M4: evaluate an arbitrary signed distance (logical px in, logical px out) over a small box: icons only
+    pub fn sdf(&mut self, bbox: &Rect, c: u32, f: impl Fn(f32, f32) -> f32) {
+        let s = self.scale;
+        let x0 = ((bbox.x * s).floor() as i32).max(0);
+        let y0 = ((bbox.y * s).floor() as i32).max(0);
+        let x1 = ((bbox.right() * s).ceil() as i32).min(self.bw);
+        let y1 = ((bbox.bottom() * s).ceil() as i32).min(self.bh);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let d = f((x as f32 + 0.5) / s, (y as f32 + 0.5) / s) * s;
+                let cv = (0.5 - d).clamp(0.0, 1.0);
+                if cv > 0.0 {
+                    self.put(x, y, c, cv);
+                }
+            }
+        }
     }
 
     /// copy a rect (buffer px) from another full-size buffer
@@ -358,5 +565,55 @@ impl Fonts {
 
     pub fn ok(&self) -> bool {
         self.font.is_some()
+    }
+
+    /// M4 bench: glyph cache entries and coverage bytes
+    pub fn cache_stats(&self) -> (usize, usize) {
+        (self.cache.len(), self.cache.values().map(|g| g.as_ref().map(|g| g.0.len()).unwrap_or(0)).sum())
+    }
+
+    /// M4: text in `r` (logical), `size` logical px, aligned; never overflows: shrinks down to `min_frac` of the
+    /// size, then ellipsizes with "…" (or "..." without that glyph). Returns the drawn width (logical px).
+    pub fn text(&mut self, cv: &mut Canvas, r: &Rect, s: &str, size: f32, color: u32, align: Align, min_frac: f32) -> f32 {
+        if self.font.is_none() || s.is_empty() || r.w <= 0.0 || r.h <= 0.0 {
+            return 0.0;
+        }
+        let mut s = self.printable(s);
+        let maxw = r.w * cv.scale;
+        let mut px = (size.min(r.h) * cv.scale).max(6.0);
+        let w = self.width(&s, px);
+        if w > maxw && w > 0.0 {
+            px = (px * maxw / w).max(px * min_frac.clamp(0.3, 1.0)).max(6.0);
+        }
+        let px = px.round();
+        if self.width(&s, px) > maxw {
+            let ell = if self.has('\u{2026}') { "\u{2026}" } else { "..." };
+            let ew = self.width(ell, px);
+            while !s.is_empty() && self.width(&s, px) + ew > maxw {
+                s.pop();
+            }
+            let t = s.trim_end().len();
+            s.truncate(t);
+            s.push_str(ell);
+        }
+        let w = self.width(&s, px);
+        let (asc, desc) = {
+            let f = self.font.as_ref().unwrap();
+            let sf = f.as_scaled(PxScale::from(px));
+            (sf.ascent(), sf.descent())
+        };
+        let x0 = match align {
+            Align::Left => r.x * cv.scale,
+            Align::Center => r.x * cv.scale + (maxw - w) / 2.0,
+            Align::Right => r.right() * cv.scale - w,
+        };
+        let top = r.y * cv.scale + (r.h * cv.scale - (asc - desc)) / 2.0;
+        self.draw_at(cv, x0, top, &s, px as u32, color);
+        w / cv.scale
+    }
+
+    /// M4: width in logical px of `s` at logical `size`
+    pub fn measure(&self, s: &str, size: f32, scale: f32) -> f32 {
+        self.width(&self.printable(s), (size * scale).round()) / scale
     }
 }

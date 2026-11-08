@@ -341,7 +341,7 @@ impl Drop for Surf {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Hit {
+pub(crate) enum Hit {
     Choice(Choice),
     PillPad,
     PillHide,
@@ -380,11 +380,11 @@ fn code_label_m(c: u16, shift: bool, altgr: bool, caps: bool, labels: Option<&cr
     }
 }
 
-fn code_label(c: u16, shift: bool, labels: Option<&crate::xkb::Labels>) -> String {
+pub(crate) fn code_label(c: u16, shift: bool, labels: Option<&crate::xkb::Labels>) -> String {
     code_label_m(c, shift, false, false, labels)
 }
 
-fn key_label(k: &PlacedKey, m: &UiModel, labels: Option<&crate::xkb::Labels>) -> String {
+pub(crate) fn key_label(k: &PlacedKey, m: &UiModel, labels: Option<&crate::xkb::Labels>) -> String {
     let caps = m.leds.0;
     let shift = m.shift;
     if shift {
@@ -1047,22 +1047,8 @@ pub fn run(sh: SharedRef, wake_rd: i32) {
                             let px = pool.px(bi);
                             let mut cv = Canvas { px, bw, bh, scale };
                             cv.clear(render::SHADE);
-                            let (frame, hits) = if s.kind == UiKind::Prompt { prompt_layout(s.w as f32, s.h as f32, ppm) } else { pill_layout(s.w as f32, ppm) };
-                            if s.kind == UiKind::Prompt {
-                                cv.round_rect(&frame, ppm * 4.0, render::CARD);
-                                let t = Rect::new(frame.x, frame.y + ppm * 5.0, frame.w, ppm * 12.0);
-                                fonts.draw_centered(&mut cv, &t, "External display connected", ppm * 6.0, render::TEXT);
-                                let t2 = Rect::new(frame.x, t.bottom(), frame.w, ppm * 9.0);
-                                fonts.draw_centered(&mut cv, &t2, "Use this tablet as a touchpad and keyboard?", ppm * 4.0, render::TEXT_DIM);
-                            } else {
-                                cv.round_rect(&frame, frame.h / 2.0, render::CARD);
-                            }
-                            for (r, h, l) in &hits {
-                                let lit = s.lit == Some(*h);
-                                cv.round_rect(r, ppm * 2.0, if lit { render::BTN_LIT } else { render::BTN });
-                                fonts.draw_centered(&mut cv, r, l, (r.h * 0.38).min(ppm * 4.5), render::TEXT);
-                            }
-                            s.hits = hits.iter().map(|(r, h, _)| (*r, *h)).collect();
+                            let (frame, hits) = draw_prompt_m3(&mut cv, &mut fonts, s.kind, s.w as f32, s.h as f32, ppm, s.lit);
+                            s.hits = hits;
                             damage.push((0, 0, bw, bh));
                             // only the card / pill takes input; the rest of the screen stays usable
                             let reg = comp.create_region(&qh, ());
@@ -1147,10 +1133,9 @@ fn ppm_of(o: &OutInfo, cfg: &crate::shared::UiCfg) -> f32 {
 
 /// `dexhid debug render --layout full [--portrait] [--edit] [--shift] [--keymap FILE] [--scale N] --out F.ppm`:
 /// draw the pad-mode screen of a layout into a PPM file (PC check of layouts, legends and the renderer)
-pub fn render_debug(a: &crate::debug::Args) -> i32 {
+fn debug_scene(a: &crate::debug::Args) -> Result<(UiModel, Option<crate::xkb::Labels>, Vec<String>), i32> {
     use dexhid_core::router::{Router, RouterCfg};
     let name = a.val("--layout").unwrap_or_else(|| "full".into());
-    let out = a.val("--out").unwrap_or_else(|| format!("/tmp/dexhid-{}.ppm", name));
     let mut dirs = vec![std::path::PathBuf::from("/usr/share/dexhid/layouts")];
     if let Some(d) = a.val("--layout-dir") {
         dirs.push(d.into());
@@ -1161,7 +1146,7 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
     }
     let Some(l) = ls.into_iter().find(|l| l.name == name) else {
         println!("FAIL no layout {}", name);
-        return 1;
+        return Err(1);
     };
     let portrait = a.flag("--portrait");
     let g = Geometry {
@@ -1297,6 +1282,109 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
             None
         }
     });
+    Ok((m, labels, r.geom_lines()))
+}
+
+/// the old ("m3") prompt / pill drawing (the daemon's look until M4 is approved)
+fn draw_prompt_m3(cv: &mut Canvas, fonts: &mut Fonts, kind: UiKind, w: f32, h: f32, ppm: f32, lit: Option<Hit>) -> (Rect, Vec<(Rect, Hit)>) {
+    let (frame, hits) = if kind == UiKind::Prompt { prompt_layout(w, h, ppm) } else { pill_layout(w, ppm) };
+    if kind == UiKind::Prompt {
+        cv.round_rect(&frame, ppm * 4.0, render::CARD);
+        let t = Rect::new(frame.x, frame.y + ppm * 5.0, frame.w, ppm * 12.0);
+        fonts.draw_centered(cv, &t, "External display connected", ppm * 6.0, render::TEXT);
+        let t2 = Rect::new(frame.x, t.bottom(), frame.w, ppm * 9.0);
+        fonts.draw_centered(cv, &t2, "Use this tablet as a touchpad and keyboard?", ppm * 4.0, render::TEXT_DIM);
+    } else {
+        cv.round_rect(&frame, frame.h / 2.0, render::CARD);
+    }
+    for (r, h, l) in &hits {
+        let on = lit == Some(*h);
+        cv.round_rect(r, ppm * 2.0, if on { render::BTN_LIT } else { render::BTN });
+        fonts.draw_centered(cv, r, l, (r.h * 0.38).min(ppm * 4.5), render::TEXT);
+    }
+    (frame, hits.iter().map(|(r, h, _)| (*r, *h)).collect())
+}
+
+/// a stand-in desktop behind the prompt / pill renders (they are translucent layer surfaces)
+fn mock_desktop(cv: &mut Canvas, w: f32, h: f32) {
+    for y in 0..cv.bh {
+        let t = y as f32 / cv.bh.max(1) as f32;
+        let c = feedback::mix(0xff2a3550, 0xff141821, t);
+        cv.px[(y * cv.bw) as usize..((y + 1) * cv.bw) as usize].fill(c);
+    }
+    cv.round_rect(&Rect::new(w * 0.08, h * 0.1, w * 0.5, h * 0.55), 10.0, 0xff1e232b);
+    cv.round_rect(&Rect::new(w * 0.08, h * 0.1, w * 0.5, h * 0.05), 10.0, 0xff2a303a);
+    cv.round_rect(&Rect::new(w * 0.45, h * 0.3, w * 0.45, h * 0.5), 10.0, 0xff242a33);
+    cv.fill(&Rect::new(0.0, h - h * 0.045, w, h * 0.045), 0xe0101318);
+}
+
+/// layouts (name, title) for the app-window picker
+fn debug_layouts(a: &crate::debug::Args) -> Vec<(String, String)> {
+    let mut dirs = vec![std::path::PathBuf::from("/usr/share/dexhid/layouts")];
+    if let Some(d) = a.val("--layout-dir") {
+        dirs.push(d.into());
+    }
+    let (ls, _) = dexhid_core::layout::load_all(&dirs);
+    ls.into_iter().filter(|l| l.name != "none").map(|l| (l.name, l.title)).collect()
+}
+
+/// M4: `--window home|<module> [--win-w W --win-h H] [--monitor] [--press N]`: the app window prototype
+fn render_window(a: &crate::debug::Args, out: &str) -> i32 {
+    let page = a.val("--window").unwrap_or_else(|| "home".into());
+    let (w, h) = (a.f64("--win-w", 1696.0) as f32, a.f64("--win-h", 1128.0) as f32);
+    let ppm = a.f64("--ppm", 1696.0 / 274.0) as f32;
+    let scale = a.f64("--scale", 1.0) as f32;
+    let v = crate::appwin::debug_view(&page, debug_layouts(a), a.flag("--monitor"));
+    let theme = a.val("--theme").unwrap_or_else(|| "dark".into());
+    let p = match a.val("--desk") {
+        Some(f) => {
+            let kg = std::fs::read_to_string(&f).unwrap_or_default();
+            match feedback::desk_look(&kg, None, None, None) {
+                Some(d) => feedback::palette_desk(&d, 100),
+                None => feedback::palette(&theme, "#4a8be0", 100),
+            }
+        }
+        None => feedback::palette(&theme, "#4a8be0", 100),
+    };
+    let (bw, bh) = ((w * scale) as i32, (h * scale) as i32);
+    let mut px = vec![0u32; (bw * bh) as usize];
+    let mut fonts = Fonts::load();
+    let pressed = a.val("--press-hit").and_then(|s| match s.as_str() {
+        "pad" => Some(crate::appwin::WinHit::StartPad),
+        "usb" => Some(crate::appwin::WinHit::StartUsb),
+        _ => None,
+    });
+    let l = {
+        let mut cv = Canvas { px: &mut px, bw, bh, scale };
+        crate::appwin::draw(&mut cv, &mut fonts, &p, w, h, ppm, &v, pressed)
+    };
+    for (r, hit) in &l.hits {
+        println!("HIT {:?} {:.0},{:.0},{:.0},{:.0} h_mm={:.1}", hit, r.x, r.y, r.w, r.h, r.h / ppm);
+    }
+    println!("WINDOW page={} overflow={}", page, l.overflow);
+    let mut f = format!("P6\n{} {}\n255\n", bw, bh).into_bytes();
+    for p in &px {
+        f.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]);
+    }
+    if let Err(e) = std::fs::write(out, f) {
+        println!("FAIL write {}: {}", out, e);
+        return 1;
+    }
+    println!("RENDERED {} {}x{} window", out, bw, bh);
+    0
+}
+
+pub fn render_debug(a: &crate::debug::Args) -> i32 {
+    let name = a.val("--layout").unwrap_or_else(|| "full".into());
+    let out = a.val("--out").unwrap_or_else(|| format!("/tmp/dexhid-{}.ppm", name));
+    if a.val("--window").is_some() {
+        return render_window(a, &out);
+    }
+    let (m, labels, geom) = match debug_scene(a) {
+        Ok(s) => s,
+        Err(rc) => return rc,
+    };
+    let m4 = a.val("--style").as_deref() == Some("m4");
     let scale = a.f64("--scale", 1.0) as f32;
     let (bw, bh) = ((m.w * scale) as i32, (m.h * scale) as i32);
     let mut px = vec![0u32; (bw * bh) as usize];
@@ -1304,8 +1392,32 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
     println!("FONT {} ok={}", fonts.path, fonts.ok());
     {
         let mut cv = Canvas { px: &mut px, bw, bh, scale };
-        draw_static(&mut cv, &mut fonts, &m, labels.as_ref());
-        draw_dynamic(&mut cv, &mut fonts, &m, labels.as_ref());
+        let surface = if a.flag("--prompt") { Some(UiKind::Prompt) } else if a.flag("--pill") { Some(UiKind::Pill) } else { None };
+        if let Some(kind) = surface {
+            // M4: the prompt / pill over a stand-in desktop; `--lit N` shows button N pressed
+            mock_desktop(&mut cv, m.w, m.h);
+            let lit = a.val("--lit").and_then(|v| v.parse::<usize>().ok());
+            let hits_all = if kind == UiKind::Prompt { prompt_layout(m.w, m.h, m.px_per_mm).1 } else { pill_layout(m.w, m.px_per_mm).1 };
+            let lit_m3 = lit.and_then(|i| hits_all.get(i)).map(|x| x.1);
+            let p = pal(&m);
+            let (frame, hits) = match (m4, kind) {
+                (true, UiKind::Prompt) => crate::look::draw_prompt(&mut cv, &mut fonts, &p, m.w, m.h, m.px_per_mm, lit.and_then(|i| crate::look::prompt_layout(m.w, m.h, m.px_per_mm).4.get(i).map(|x| x.1))),
+                (true, _) => crate::look::draw_pill(&mut cv, &mut fonts, &p, m.w, m.px_per_mm, lit.map(|i| if i == 0 { Hit::PillPad } else { Hit::PillHide })),
+                _ => draw_prompt_m3(&mut cv, &mut fonts, kind, m.w, m.h, m.px_per_mm, lit_m3),
+            };
+            println!("SURFACE kind={} frame={:.0},{:.0},{:.0},{:.0}", kind.name(), frame.x, frame.y, frame.w, frame.h);
+            for (r, h) in &hits {
+                println!("HIT {} {:.0},{:.0},{:.0},{:.0} h_mm={:.1}", h.name(), r.x, r.y, r.w, r.h, r.h / m.px_per_mm);
+            }
+        } else if m4 {
+            let p = pal(&m);
+            crate::look::draw_static(&mut cv, &mut fonts, &m, &p, corner(&m), labels.as_ref());
+            let mut d = vec![];
+            crate::look::draw_dynamic(&mut cv, &mut fonts, &m, &p, corner(&m), labels.as_ref(), &mut d);
+        } else {
+            draw_static(&mut cv, &mut fonts, &m, labels.as_ref());
+            draw_dynamic(&mut cv, &mut fonts, &m, labels.as_ref());
+        }
         // M3: a synthetic preview frame (a gradient with a "window") for the mirror render
         if a.flag("--mirror") {
             let (w, h) = (480u32, 270u32);
@@ -1328,10 +1440,224 @@ pub fn render_debug(a: &crate::debug::Args) -> i32 {
         println!("FAIL write {}: {}", out, e);
         return 1;
     }
-    for l in r.geom_lines().iter().take(4) {
+    for l in geom.iter().take(4) {
         println!("{}", l);
     }
     println!("RENDERED {} {}x{} keys={} regions={}", out, bw, bh, m.keys.len(), m.regions.len());
     let _ = Btn::Display;
+    0
+}
+
+/// M4 measurement: `dexhid debug bench [--scale 2] [--iters 40] [--desk F --plasmashellrc F]`: per state and look
+/// (current "m3" and the M4 prototype) the static-layer redraw, the per-frame dynamic redraw (key press, touch
+/// dot), the shift path (static redraw + full copy), the model clone the daemon -> UI hand-off does twice per input
+/// event; median ms, heap allocations per call (with `--features alloc-count`), damaged px; then glyph cache, RSS
+/// and the buffer memory the UI holds for that size.
+pub fn bench_debug(a: &crate::debug::Args) -> i32 {
+    use std::time::Instant;
+    let scale = a.f64("--scale", 2.0) as f32;
+    let iters = a.f64("--iters", 40.0).max(3.0) as usize;
+    let mut extra: Vec<String> = vec![];
+    for k in ["--desk", "--plasmashellrc", "--theme"] {
+        if let Some(v) = a.val(k) {
+            extra.push(k.into());
+            extra.push(v);
+        }
+    }
+    let cases: &[(&str, &[&str])] = &[
+        ("pad+full", &["--layout", "full", "--quick"]),
+        ("pad+full+bands", &["--layout", "full", "--quick", "--bands"]),
+        ("settings-open", &["--layout", "full", "--quick", "--sheet", "pointer"]),
+        ("portrait", &["--layout", "full", "--quick", "--portrait"]),
+        ("laptop+usb", &["--layout", "laptop", "--laptop", "--target", "To: USB device"]),
+    ];
+    let mut fonts = Fonts::load();
+    println!("BENCH font={} ok={} scale={} iters={} alloc_count={}", fonts.path, fonts.ok(), scale, iters, cfg!(feature = "alloc-count"));
+    let med = |v: &mut Vec<f64>| -> f64 {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    };
+    let mut buf_px = 0usize;
+    for (name, args) in cases {
+        let mut argv: Vec<String> = vec!["bench".into()];
+        argv.extend(args.iter().map(|s| s.to_string()));
+        argv.extend(extra.iter().cloned());
+        let sa = crate::debug::Args(argv);
+        let (m, labels, _) = match debug_scene(&sa) {
+            Ok(s) => s,
+            Err(rc) => return rc,
+        };
+        let (bw, bh) = ((m.w * scale) as i32, (m.h * scale) as i32);
+        buf_px = buf_px.max((bw * bh) as usize);
+        let p = pal(&m);
+        let cr = corner(&m);
+        let pad = m.regions.iter().find(|r| r.id == dexhid_core::arrangement::TOUCHPAD).map(|r| r.rect).unwrap_or(Rect::new(0.0, 0.0, m.w, m.h));
+        // model hand-off (daemon publish + UI take = 2 clones per input event)
+        let mut tv = vec![];
+        let a0 = crate::allocs();
+        for _ in 0..iters {
+            let t0 = Instant::now();
+            let c = std::hint::black_box(m.clone());
+            tv.push(t0.elapsed().as_secs_f64() * 1e3);
+            drop(c);
+        }
+        let a1 = crate::allocs();
+        println!("BENCH {:<15} model-clone      {:>8.3} ms  allocs={:>5} bytes={:>7} keys={} buttons={}", name, med(&mut tv), (a1.0 - a0.0) / iters as u64, (a1.1 - a0.1) / iters as u64, m.keys.len(), m.buttons.len());
+        for style in ["m3", "m4"] {
+            let m4 = style == "m4";
+            let mut stat = vec![0u32; (bw * bh) as usize];
+            let mut buf = vec![0u32; (bw * bh) as usize];
+            // static layer
+            let mut tv = vec![];
+            let a0 = crate::allocs();
+            for _ in 0..iters.min(12) {
+                let t0 = Instant::now();
+                let mut cv = Canvas { px: &mut stat, bw, bh, scale };
+                if m4 {
+                    crate::look::draw_static(&mut cv, &mut fonts, &m, &p, cr, labels.as_ref());
+                } else {
+                    draw_static(&mut cv, &mut fonts, &m, labels.as_ref());
+                }
+                tv.push(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            let a1 = crate::allocs();
+            let n_st = iters.min(12) as u64;
+            println!("BENCH {:<15} {} static        {:>8.3} ms  allocs={:>5} bytes={:>7}", name, style, med(&mut tv), (a1.0 - a0.0) / n_st, (a1.1 - a0.1) / n_st);
+            // full copy into a pool buffer (the first frame after any static change, once per buffer)
+            let mut tv = vec![];
+            for _ in 0..iters {
+                let t0 = Instant::now();
+                buf.copy_from_slice(&stat);
+                tv.push(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            let copy = med(&mut tv);
+            println!("BENCH {:<15} {} full-copy     {:>8.3} ms  px={}", name, style, copy, bw * bh);
+            // dynamic frames: restore the previous rects from the static layer, draw the new state
+            for (what, keyed) in [("key-frame", true), ("dot-frame", false)] {
+                let mut mm = m.clone();
+                let mut prev: Vec<(i32, i32, i32, i32)> = vec![];
+                let mut tv = vec![];
+                let mut dmg = 0i64;
+                let nk = mm.keys.len().max(1);
+                let a0 = crate::allocs();
+                for i in 0..iters {
+                    if keyed {
+                        mm.lit_keys = if mm.keys.is_empty() { vec![] } else { vec![(i * 7) % nk] };
+                        mm.dots = vec![];
+                    } else {
+                        mm.lit_keys = vec![];
+                        mm.dots = vec![(pad.x + pad.w * (0.2 + 0.6 * (i as f32 / iters as f32)), pad.y + pad.h * 0.5)];
+                    }
+                    let t0 = Instant::now();
+                    let mut cv = Canvas { px: &mut buf, bw, bh, scale };
+                    for r in &prev {
+                        cv.copy_from(&stat, *r);
+                    }
+                    let d: Vec<(i32, i32, i32, i32)> = if m4 {
+                        let mut lr = vec![];
+                        crate::look::draw_dynamic(&mut cv, &mut fonts, &mm, &p, cr, labels.as_ref(), &mut lr);
+                        lr.iter().map(|r| cv.damage_of(r)).collect()
+                    } else {
+                        draw_dynamic(&mut cv, &mut fonts, &mm, labels.as_ref())
+                    };
+                    tv.push(t0.elapsed().as_secs_f64() * 1e3);
+                    dmg += d.iter().chain(prev.iter()).map(|r| (r.2 * r.3) as i64).sum::<i64>();
+                    prev = d;
+                }
+                let a1 = crate::allocs();
+                println!("BENCH {:<15} {} {:<13} {:>8.3} ms  allocs={:>5} bytes={:>7} damaged_px={}", name, style, what, med(&mut tv), (a1.0 - a0.0) / iters as u64, (a1.1 - a0.1) / iters as u64, dmg / iters as i64);
+            }
+            // shift / latch / Fn / info text: today a static change (model version bump) = static redraw + full copy
+            let mut tv = vec![];
+            for _ in 0..iters.min(12) {
+                let t0 = Instant::now();
+                let mut cv = Canvas { px: &mut stat, bw, bh, scale };
+                if m4 {
+                    crate::look::draw_static(&mut cv, &mut fonts, &m, &p, cr, labels.as_ref());
+                } else {
+                    draw_static(&mut cv, &mut fonts, &m, labels.as_ref());
+                }
+                buf.copy_from_slice(&stat);
+                tv.push(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            println!("BENCH {:<15} {} shift-frame   {:>8.3} ms  damaged_px={}", name, style, med(&mut tv), bw * bh);
+        }
+    }
+    // prompt (full redraw on each press today)
+    let (m, _, _) = match debug_scene(&crate::debug::Args(vec!["bench".into(), "--layout".into(), "full".into()])) {
+        Ok(s) => s,
+        Err(rc) => return rc,
+    };
+    let (bw, bh) = ((m.w * scale) as i32, (m.h * scale) as i32);
+    let mut px = vec![0u32; (bw * bh) as usize];
+    for style in ["m3", "m4"] {
+        let mut tv = vec![];
+        for _ in 0..iters.min(12) {
+            let t0 = Instant::now();
+            let mut cv = Canvas { px: &mut px, bw, bh, scale };
+            cv.clear(render::SHADE);
+            if style == "m4" {
+                crate::look::draw_prompt(&mut cv, &mut fonts, &pal(&m), m.w, m.h, m.px_per_mm, None);
+            } else {
+                draw_prompt_m3(&mut cv, &mut fonts, UiKind::Prompt, m.w, m.h, m.px_per_mm, None);
+            }
+            tv.push(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        println!("BENCH prompt          {} full-redraw   {:>8.3} ms  px={}", style, med(&mut tv), bw * bh);
+    }
+    // M4 app window (1696x1128 logical, the panel minus the Plasma panel): full redraw per page, the press redraw
+    // of one button (damage = that rect), buffer memory (2 x window size while open, 0 while closed)
+    {
+        let (w, h, ppm) = (1696.0f32, 1128.0f32, 1696.0f32 / 274.0);
+        let lays = debug_layouts(&crate::debug::Args(vec![]));
+        let (bw, bh) = ((w * scale) as i32, (h * scale) as i32);
+        let mut px = vec![0u32; (bw * bh) as usize];
+        for page in ["home", "pointer", "usbhid"] {
+            let v = crate::appwin::debug_view(page, lays.clone(), false);
+            let p = feedback::palette("dark", "#4a8be0", 100);
+            let mut tv = vec![];
+            let a0 = crate::allocs();
+            for _ in 0..iters.min(12) {
+                let t0 = Instant::now();
+                let mut cv = Canvas { px: &mut px, bw, bh, scale };
+                crate::appwin::draw(&mut cv, &mut fonts, &p, w, h, ppm, &v, None);
+                tv.push(t0.elapsed().as_secs_f64() * 1e3);
+            }
+            let a1 = crate::allocs();
+            let n = iters.min(12) as u64;
+            println!("BENCH window-{:<8} full-redraw   {:>8.3} ms  allocs={:>5} px={}", page, med(&mut tv), (a1.0 - a0.0) / n, bw * bh);
+        }
+        // one pressed button: redraw only its rect over the cached page (what the implementation will do)
+        let v = crate::appwin::debug_view("home", lays.clone(), true);
+        let p = feedback::palette("dark", "#4a8be0", 100);
+        let l = crate::appwin::layout(w, h, ppm, &v);
+        let br = l.hits.iter().find(|x| x.1 == crate::appwin::WinHit::StartPad).map(|x| x.0).unwrap_or(Rect::new(0.0, 0.0, 1.0, 1.0));
+        let t = crate::look::Tokens::new(ppm, 1.0);
+        let c = crate::look::Roles::from(&p);
+        let mut tv = vec![];
+        for _ in 0..iters {
+            let t0 = Instant::now();
+            let mut cv = Canvas { px: &mut px, bw, bh, scale };
+            cv.rrect(&br, t.r_md, c.raised | 0xff00_0000);
+            crate::look::button(&mut cv, &mut fonts, &t, &c, &br, "Start touchpad mode", Some(crate::look::Icon::Play), crate::look::Tone::Filled, true);
+            tv.push(t0.elapsed().as_secs_f64() * 1e3);
+        }
+        println!("BENCH window-press     button-frame  {:>8.3} ms  damaged_px={}", med(&mut tv), ((br.w * scale) * (br.h * scale)) as i64);
+        println!("BENCH window-memory    open: 2 buffers = {:.1} MiB (+ 1 cached page {:.1} MiB); closed: 0 (no surface, no pool, no timer)", 2.0 * (bw * bh) as f64 * 4.0 / 1048576.0, (bw * bh) as f64 * 4.0 / 1048576.0);
+    }
+    let (n, b) = fonts.cache_stats();
+    println!("BENCH glyph-cache entries={} bytes={}", n, b);
+    let st = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let get = |k: &str| st.lines().find(|l| l.starts_with(k)).map(|l| l.split_whitespace().nth(1).unwrap_or("0").to_string()).unwrap_or_default();
+    let mb = |px: usize| px as f64 * 4.0 / 1048576.0;
+    println!(
+        "BENCH memory buffer={}px ({:.1} MiB) overlay holds static + 2 pool = {:.1} MiB; prompt/pill pool 2 = {:.1} MiB; bench VmRSS={} kB VmHWM={} kB",
+        buf_px,
+        mb(buf_px),
+        3.0 * mb(buf_px),
+        2.0 * mb(buf_px),
+        get("VmRSS:"),
+        get("VmHWM:")
+    );
     0
 }

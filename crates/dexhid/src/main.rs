@@ -31,8 +31,50 @@ mod notify;
 mod render;
 mod shared;
 mod sys;
+mod appwin;
+mod look;
 mod ui;
 mod xkb;
+
+/// M4 measurement: a counting allocator, only with `--features alloc-count` (the bench reads `allocs()`)
+#[cfg(feature = "alloc-count")]
+mod alloc_count {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub static N: AtomicU64 = AtomicU64::new(0);
+    pub static BYTES: AtomicU64 = AtomicU64::new(0);
+    pub struct Counting;
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+            N.fetch_add(1, Ordering::Relaxed);
+            BYTES.fetch_add(l.size() as u64, Ordering::Relaxed);
+            unsafe { System.alloc(l) }
+        }
+        unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+            unsafe { System.dealloc(p, l) }
+        }
+        unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+            N.fetch_add(1, Ordering::Relaxed);
+            BYTES.fetch_add(n as u64, Ordering::Relaxed);
+            unsafe { System.realloc(p, l, n) }
+        }
+    }
+    #[global_allocator]
+    static GA: Counting = Counting;
+}
+
+/// heap allocations so far (count, bytes); (0, 0) without the `alloc-count` feature
+pub fn allocs() -> (u64, u64) {
+    #[cfg(feature = "alloc-count")]
+    {
+        use std::sync::atomic::Ordering;
+        (alloc_count::N.load(Ordering::Relaxed), alloc_count::BYTES.load(Ordering::Relaxed))
+    }
+    #[cfg(not(feature = "alloc-count"))]
+    {
+        (0, 0)
+    }
+}
 
 /// M2.1: where the panel restore record lives ($XDG_STATE_HOME/dexhid/panels.json)
 pub fn panels_state() -> PathBuf {

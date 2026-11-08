@@ -10,6 +10,10 @@ publish.workspace = true
 name = "dexhid"
 path = "src/main.rs"
 
+[features]
+# M4 measurement only (`dexhid debug bench`): count heap allocations per frame. Off in every shipped build.
+alloc-count = []
+
 [dependencies]
 dexhid-core = { path = "../dexhid-core" }
 libc = "0.2"

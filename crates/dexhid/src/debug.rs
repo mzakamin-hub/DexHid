@@ -34,6 +34,8 @@ pub fn run(a: &Args) -> i32 {
         Some("replay") => replay(a),
         Some("volsim") => volsim(a),
         Some("render") => crate::ui::render_debug(a),
+        // M4: redraw cost / allocations / buffer memory of typical states (PC measurement)
+        Some("bench") => crate::ui::bench_debug(a),
         // M3 test tools
         Some("hid-desc") => hid_desc(a),
         Some("hid-client") => hid_client(a),
