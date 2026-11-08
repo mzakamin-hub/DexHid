@@ -358,7 +358,8 @@ rm -rf ~/.config/dexhid ~/.local/state/dexhid ~/.local/share/dexhid   # optional
 - **Inspiration:** the idea of using the tablet as a keyboard and touchpad for an external display comes from the
   input deck of [Denial](https://github.com/denialwm/denial) ([DenialWM](https://github.com/denialwm)) by Doctor
   Logix. DexHid also uses the deck's behaviour numbers: the tap / hold timing, the click zones and the swipe
-  thresholds. DexHid is written from scratch and contains no Denial code.
+  thresholds. DexHid is written from scratch and contains no Denial code. [`CREDITS.md`](CREDITS.md) lists exactly
+  what was taken from Denial and where it lives in DexHid.
 - **`third_party/blocking`** is [smol-rs/blocking](https://github.com/smol-rs/blocking) 1.7.0 (Apache-2.0 OR MIT;
   its `LICENSE-APACHE` and `LICENSE-MIT` are kept). It carries one change, described in
   `third_party/blocking/DEXHID-PATCH.md`, that lets idle pool threads exit so the idle daemon does not wake up.
